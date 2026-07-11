@@ -1,0 +1,351 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/bluenviron/gortsplib/v5"
+	"github.com/bluenviron/gortsplib/v5/pkg/base"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph265"
+	"github.com/pion/rtp"
+)
+
+const (
+	snapshotDur = 5 * time.Second
+	ringKeepDur = 10 * time.Second
+)
+
+type CameraWorker struct {
+	cfg           Camera
+	sadCutoff     float64
+	sustainFrames int
+	minBlob       int
+	cooldown      time.Duration
+	ignore        []bool
+	status        string
+
+	mu            sync.Mutex
+	ring          *ringBuffer
+	lastMotionAt  time.Time
+	subCodec      int // VPL_CODEC_HEVC or VPL_CODEC_AVC
+	subSPS        []byte // H.264 SDP params for preview / IDR
+	subPPS        []byte
+	latestSubs    [][]byte // recent sub annex-B AUs for on-demand web JPEG
+	previewJPEG   []byte
+	previewJPEGAt time.Time
+
+	detectQ chan<- DetectEvent
+	logQ    chan<- string
+}
+
+const previewAUKeep = 24
+
+func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBlob int, cooldown time.Duration, detectQ chan<- DetectEvent, logQ chan<- string) *CameraWorker {
+	if sustainFrames < 1 {
+		sustainFrames = 1
+	}
+	if minBlob < 1 {
+		minBlob = 1
+	}
+	return &CameraWorker{
+		cfg:           cam,
+		sadCutoff:     sadCutoff,
+		sustainFrames: sustainFrames,
+		minBlob:       minBlob,
+		cooldown:      cooldown,
+		ignore:        buildIgnoreMask(cam.MotionMasks),
+		status:        "reconnecting",
+		ring:          newRingBuffer(maxBuf),
+		detectQ:       detectQ,
+		logQ:          logQ,
+	}
+}
+
+// tryMotionFire returns true if motion may enqueue (cooldown elapsed).
+func (w *CameraWorker) tryMotionFire() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := time.Now()
+	if w.cooldown > 0 && !w.lastMotionAt.IsZero() && now.Sub(w.lastMotionAt) < w.cooldown {
+		return false
+	}
+	w.lastMotionAt = now
+	return true
+}
+
+func (w *CameraWorker) setStatus(s string) {
+	w.mu.Lock()
+	w.status = s
+	w.mu.Unlock()
+}
+
+func (w *CameraWorker) Status() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.status
+}
+
+func (w *CameraWorker) Name() string {
+	return w.cfg.Name
+}
+
+func (w *CameraWorker) setSubCodec(codec int) {
+	w.mu.Lock()
+	w.subCodec = codec
+	w.mu.Unlock()
+}
+
+func (w *CameraWorker) SubCodec() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.subCodec
+}
+
+func (w *CameraWorker) setSubH264Params(sps, pps []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(sps) > 0 {
+		w.subSPS = append([]byte(nil), sps...)
+	}
+	if len(pps) > 0 {
+		w.subPPS = append([]byte(nil), pps...)
+	}
+}
+
+func (w *CameraWorker) SubH264Params() (sps, pps []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.subSPS) > 0 {
+		sps = append([]byte(nil), w.subSPS...)
+	}
+	if len(w.subPPS) > 0 {
+		pps = append([]byte(nil), w.subPPS...)
+	}
+	return sps, pps
+}
+
+// setLatestSubAU appends a sub annex-B AU for web looksee (RAM only, short ring).
+func (w *CameraWorker) setLatestSubAU(au []byte) {
+	if len(au) == 0 {
+		return
+	}
+	cp := make([]byte, len(au))
+	copy(cp, au)
+	w.mu.Lock()
+	w.latestSubs = append(w.latestSubs, cp)
+	if len(w.latestSubs) > previewAUKeep {
+		w.latestSubs = w.latestSubs[len(w.latestSubs)-previewAUKeep:]
+	}
+	w.mu.Unlock()
+}
+
+func (w *CameraWorker) copyLatestSubs() [][]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.latestSubs) == 0 {
+		return nil
+	}
+	out := make([][]byte, len(w.latestSubs))
+	for i, au := range w.latestSubs {
+		cp := make([]byte, len(au))
+		copy(cp, au)
+		out[i] = cp
+	}
+	return out
+}
+
+// cachedPreviewJPEG returns any cached looksee JPEG (up to 60s).
+func (w *CameraWorker) cachedPreviewJPEG() []byte {
+	return w.cachedPreviewJPEGFresh(60 * time.Second)
+}
+
+// cachedPreviewJPEGFresh returns cache only if younger than ttl.
+func (w *CameraWorker) cachedPreviewJPEGFresh(ttl time.Duration) []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.previewJPEG) == 0 || time.Since(w.previewJPEGAt) > ttl {
+		return nil
+	}
+	out := make([]byte, len(w.previewJPEG))
+	copy(out, w.previewJPEG)
+	return out
+}
+
+func (w *CameraWorker) storePreviewJPEG(jpg []byte) {
+	// Always install a fresh slice so HTTP readers never see a half-written buffer.
+	cp := make([]byte, len(jpg))
+	copy(cp, jpg)
+	w.mu.Lock()
+	w.previewJPEG = cp
+	w.previewJPEGAt = time.Now()
+	w.mu.Unlock()
+}
+
+func annexB(parts ...[]byte) []byte {
+	var b bytes.Buffer
+	for _, p := range parts {
+		if len(p) == 0 {
+			continue
+		}
+		b.Write([]byte{0, 0, 0, 1})
+		b.Write(p)
+	}
+	return b.Bytes()
+}
+
+func (w *CameraWorker) Run(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		w.setStatus("reconnecting")
+		w.stream(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+
+		w.setStatus("reconnecting")
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+func (w *CameraWorker) stream(ctx context.Context) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		w.runMain(streamCtx)
+	}()
+	go func() {
+		defer wg.Done()
+		w.runSub(streamCtx)
+	}()
+
+	w.setStatus("connected")
+	wg.Wait()
+}
+
+func (w *CameraWorker) runMain(ctx context.Context) {
+	u, err := base.ParseURL(w.cfg.Main)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s main: %v\n", w.cfg.Name, err)
+		return
+	}
+
+	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	if err := c.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s main: %v\n", w.cfg.Name, err)
+		return
+	}
+	defer c.Close()
+
+	desc, _, err := c.Describe(u)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s main: %v\n", w.cfg.Name, err)
+		return
+	}
+
+	var forma *format.H265
+	medi := desc.FindFormat(&forma)
+	if medi == nil {
+		fmt.Fprintf(os.Stderr, "%s main: no H265\n", w.cfg.Name)
+		return
+	}
+
+	rtpDec, err := forma.CreateDecoder()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s main: %v\n", w.cfg.Name, err)
+		return
+	}
+
+	if _, err = c.Setup(desc.BaseURL, medi, 0, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "%s main: %v\n", w.cfg.Name, err)
+		return
+	}
+
+	trim := time.NewTicker(2 * time.Second)
+	defer trim.Stop()
+
+	c.OnPacketRTP(medi, forma, func(pkt *rtp.Packet) {
+		if ctx.Err() != nil {
+			return
+		}
+
+		au, err := rtpDec.Decode(pkt)
+		if err != nil {
+			if errors.Is(err, rtph265.ErrMorePacketsNeeded) || errors.Is(err, rtph265.ErrNonStartingPacketAndNoPrevious) {
+				return
+			}
+			return
+		}
+
+		w.ring.push(annexB(au...))
+	})
+
+	if _, err = c.Play(nil); err != nil {
+		fmt.Fprintf(os.Stderr, "%s main: %v\n", w.cfg.Name, err)
+		return
+	}
+
+	go func() {
+		<-ctx.Done()
+		c.Close()
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-trim.C:
+			w.ring.trim(ringKeepDur)
+		case <-done:
+			return
+		}
+	}
+}
+
+func (w *CameraWorker) enqueueDetect(label string, sad float64, subRGB []byte) {
+	segments := w.ring.snapshot(snapshotDur)
+	if len(segments) == 0 {
+		return
+	}
+
+	ev := DetectEvent{
+		Cam:      w.cfg.Name,
+		At:       time.Now(),
+		Segments: segments,
+		SubRGB:   subRGB,
+		SAD:      sad,
+		Label:    label,
+	}
+
+	go func(ev DetectEvent) {
+		if sad >= 0 {
+			w.logQ <- fmt.Sprintf("%s: %s sad=%.1f%% queued %d aus %.1fMB", ev.Cam, label, sad, len(ev.Segments), eventMB(ev))
+		} else {
+			w.logQ <- fmt.Sprintf("%s: %s queued %d aus %.1fMB", ev.Cam, label, len(ev.Segments), eventMB(ev))
+		}
+		w.detectQ <- ev
+	}(ev)
+}
+
+func (w *CameraWorker) FakeMotion() {
+	w.enqueueDetect("fake", -1, nil)
+}

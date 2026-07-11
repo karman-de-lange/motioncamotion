@@ -1,0 +1,20 @@
+{
+  "cameras": [
+    {"name": "sub_01", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/102"},
+    {"name": "sub_02", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/202"},
+    {"name": "sub_03", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/302"},
+    {"name": "sub_04", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/402"},
+    {"name": "sub_05", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/102"},
+    {"name": "sub_06", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/202"},
+    {"name": "sub_07", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/302"},
+    {"name": "sub_08", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/402"},
+    {"name": "sub_09", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/102"},
+    {"name": "sub_10", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/202"},
+    {"name": "sub_11", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/302"},
+    {"name": "sub_12", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/402"},
+    {"name": "sub_13", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/102"},
+    {"name": "sub_14", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/202"},
+    {"name": "sub_15", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/302"},
+    {"name": "sub_16", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/402"}
+  ]
+}

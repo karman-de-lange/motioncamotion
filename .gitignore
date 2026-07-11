@@ -1,0 +1,31 @@
+# binaries
+motioncamotion
+stagetest
+/tmp/
+*.o
+*.a
+
+# runtime / media
+clips/
+snapshots/
+*.h265
+*.h264
+*.mp4
+*.jpg
+*.jpeg
+*.ppm
+*.png
+*.yuv
+
+# python / local
+.venv/
+__pycache__/
+*.pyc
+
+# editor / OS
+.DS_Store
+*~
+*.swp
+
+# optional large model (keep if you want it tracked — comment out to commit)
+# models/*.onnx

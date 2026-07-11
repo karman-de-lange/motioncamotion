@@ -1,0 +1,18 @@
+{
+  "threshold": 0.03,
+  "buffer_mb": 200,
+  "fake_motion_sec": 8,
+  "sub_conf": 0.25,
+  "main_conf": 0.35,
+  "force_stage2": true,
+  "model": "models/yolov8n.onnx",
+  "device": "GPU",
+  "clip_dir": "clips/stagetest",
+  "cameras": [
+    {
+      "name": "hik2",
+      "main": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/201",
+      "sub": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/202"
+    }
+  ]
+}

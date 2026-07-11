@@ -1,0 +1,15 @@
+{
+  "threshold": 0.03,
+  "buffer_mb": 200,
+  "fake_motion_sec": 6,
+  "headless": true,
+  "clip_dir": "clips",
+  "clip_cams": ["hik1"],
+  "cameras": [
+    {
+      "name": "hik1",
+      "main": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/101",
+      "sub": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/102"
+    }
+  ]
+}

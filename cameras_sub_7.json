@@ -1,0 +1,11 @@
+{
+  "cameras": [
+    {"name": "hik1_sub", "url": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/102"},
+    {"name": "hik2_sub", "url": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/202"},
+    {"name": "hik3_sub", "url": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/302"},
+    {"name": "hik150_1_sub", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/102"},
+    {"name": "hik150_2_sub", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/202"},
+    {"name": "hik150_3_sub", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/302"},
+    {"name": "hik150_4_sub", "url": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/402"}
+  ]
+}
