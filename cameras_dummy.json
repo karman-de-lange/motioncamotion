@@ -1,0 +1,23 @@
+{
+  "threshold": 0.03,
+  "buffer_mb": 100,
+  "motion_sustain_frames": 3,
+  "motion_cooldown_sec": 3,
+  "motion_min_blob": 8,
+  "model": "models/yolov8n.onnx",
+  "device": "GPU",
+  "sub_conf": 0.5,
+  "main_conf": 0.65,
+  "force_stage2": true,
+  "fake_motion_sec": 0,
+  "preview_addr": ":8088",
+  "headless": true,
+  "cameras": [
+    {
+      "name": "dummy161_2",
+      "main": "rtsp://127.0.0.1:8556/nvr161_2_main",
+      "sub": "rtsp://127.0.0.1:8556/nvr161_2_sub",
+      "motion_masks": [{"x": 0.0, "y": 0.0, "w": 0.28, "h": 0.07}]
+    }
+  ]
+}

@@ -37,6 +37,7 @@ type CameraWorker struct {
 	subSPS        []byte // H.264 SDP params for preview / IDR
 	subPPS        []byte
 	latestSubs    [][]byte // recent sub annex-B AUs for on-demand web JPEG
+	lastSubAUAt   time.Time
 	previewJPEG   []byte
 	previewJPEGAt time.Time
 
@@ -143,17 +144,37 @@ func (w *CameraWorker) setLatestSubAU(au []byte) {
 	if len(w.latestSubs) > previewAUKeep {
 		w.latestSubs = w.latestSubs[len(w.latestSubs)-previewAUKeep:]
 	}
+	w.lastSubAUAt = time.Now()
 	w.mu.Unlock()
 }
 
+// subAUStale reports whether no sub AU has arrived within maxAge (or never).
+func (w *CameraWorker) subAUStale(maxAge time.Duration) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.lastSubAUAt.IsZero() {
+		return true
+	}
+	return time.Since(w.lastSubAUAt) > maxAge
+}
+
 func (w *CameraWorker) copyLatestSubs() [][]byte {
+	return w.copyLatestSubsN(0)
+}
+
+// copyLatestSubsN returns the last n sub AUs (n<=0 means all).
+func (w *CameraWorker) copyLatestSubsN(n int) [][]byte {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if len(w.latestSubs) == 0 {
 		return nil
 	}
-	out := make([][]byte, len(w.latestSubs))
-	for i, au := range w.latestSubs {
+	start := 0
+	if n > 0 && len(w.latestSubs) > n {
+		start = len(w.latestSubs) - n
+	}
+	out := make([][]byte, len(w.latestSubs)-start)
+	for i, au := range w.latestSubs[start:] {
 		cp := make([]byte, len(au))
 		copy(cp, au)
 		out[i] = cp
@@ -198,6 +219,12 @@ func annexB(parts ...[]byte) []byte {
 		b.Write(p)
 	}
 	return b.Bytes()
+}
+
+// rtspTCPClient forces interleaved TCP. UDP loses heavily on remote NVRs (e.g. 10.0.0.161).
+func rtspTCPClient(u *base.URL) *gortsplib.Client {
+	p := gortsplib.ProtocolTCP
+	return &gortsplib.Client{Scheme: u.Scheme, Host: u.Host, Protocol: &p}
 }
 
 func (w *CameraWorker) Run(ctx context.Context) {
@@ -247,7 +274,7 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 		return
 	}
 
-	c := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+	c := rtspTCPClient(u)
 	if err := c.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "%s main: %v\n", w.cfg.Name, err)
 		return
@@ -294,7 +321,16 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 			return
 		}
 
-		w.ring.push(annexB(au...))
+		// In-band VPS: push as-is. IRAP without VPS: inject SDP once (not every P-frame).
+		if h265AUHasVPS(au) {
+			w.ring.push(annexB(au...))
+		} else if h265AUHasIRAP(au) {
+			parts := [][]byte{forma.VPS, forma.SPS, forma.PPS}
+			parts = append(parts, au...)
+			w.ring.push(annexB(parts...))
+		} else {
+			w.ring.push(annexB(au...))
+		}
 	})
 
 	if _, err = c.Play(nil); err != nil {

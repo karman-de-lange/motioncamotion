@@ -78,6 +78,18 @@
       "main": "rtsp://admin:L255CEA4@10.3.1.57:554/cam/realmonitor?channel=1&subtype=0",
       "sub": "rtsp://admin:L255CEA4@10.3.1.57:554/cam/realmonitor?channel=1&subtype=1",
       "motion_masks": [{"x": 0.71, "y": 0.03, "w": 0.29, "h": 0.06}]
+    },
+    {
+      "name": "nvr161_2",
+      "main": "rtsp://homeassistant:Karman112233@10.0.0.161:554/Streaming/Channels/201",
+      "sub": "rtsp://homeassistant:Karman112233@10.0.0.161:554/Streaming/Channels/202",
+      "motion_masks": [{"x": 0.0, "y": 0.0, "w": 0.28, "h": 0.07}]
+    },
+    {
+      "name": "nvr161_3",
+      "main": "rtsp://homeassistant:Karman112233@10.0.0.161:554/Streaming/Channels/301",
+      "sub": "rtsp://homeassistant:Karman112233@10.0.0.161:554/Streaming/Channels/302",
+      "motion_masks": [{"x": 0.0, "y": 0.0, "w": 0.28, "h": 0.07}]
     }
   ]
 }
