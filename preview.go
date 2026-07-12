@@ -53,7 +53,61 @@ func encodePreviewJPEG(rgb []byte, width, height int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Pre-H264 looksee: feed recent sub AUs into a fresh VPL decoder → RGB → JPEG.
+// annexBHasNALType scans annex-B for H.264 nal_unit_type (e.g. 5=IDR, 7=SPS).
+func annexBHasNALType(b []byte, nalType byte) bool {
+	for i := 0; i+4 < len(b); i++ {
+		if b[i] != 0 || b[i+1] != 0 {
+			continue
+		}
+		off := 0
+		if b[i+2] == 1 {
+			off = i + 3
+		} else if i+3 < len(b) && b[i+2] == 0 && b[i+3] == 1 {
+			off = i + 4
+		} else {
+			continue
+		}
+		if off < len(b) && b[off]&0x1F == nalType {
+			return true
+		}
+	}
+	return false
+}
+
+// prepareLookseeAUs: HEVC ring is used as-is. H.264: start at first IDR in the
+// ring (need a keyframe for a fresh decoder) and inject SDP SPS/PPS once only.
+func prepareLookseeAUs(aus [][]byte, codec int, sps, pps []byte) [][]byte {
+	if len(aus) == 0 {
+		return aus
+	}
+	if codec != int(C.VPL_CODEC_AVC) {
+		return aus
+	}
+	start := -1
+	for i, au := range aus {
+		if annexBHasNALType(au, 5) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		// No IDR in ring yet — still try from start with SPS/PPS (may fail until GOP).
+		start = 0
+	}
+	out := make([][]byte, len(aus)-start)
+	copy(out, aus[start:])
+	if len(sps) > 0 && len(out) > 0 && !annexBHasNALType(out[0], 7) {
+		head := annexB(sps, pps)
+		first := make([]byte, 0, len(head)+len(out[0]))
+		first = append(first, head...)
+		first = append(first, out[0]...)
+		out[0] = first
+	}
+	return out
+}
+
+// Looksee: feed recent sub AUs into a fresh VPL decoder → RGB → JPEG.
+// codec selects HEVC vs AVC session; only AVC uses sps/pps injection above.
 func decodeAUsToRGBFit(aus [][]byte, maxW, maxH, codec int) (rgb []byte, outW, outH int, err error) {
 	if len(aus) == 0 {
 		return nil, 0, 0, fmt.Errorf("no sub frame yet")
@@ -105,6 +159,9 @@ func (w *CameraWorker) previewJPEGBytes() ([]byte, error) {
 	if codec != int(C.VPL_CODEC_AVC) {
 		codec = int(C.VPL_CODEC_HEVC)
 	}
+	sps, pps := w.SubH264Params()
+	aus = prepareLookseeAUs(aus, codec, sps, pps)
+
 	rgb, pw, ph, err := decodeAUsToRGBFit(aus, previewMaxW, previewMaxH, codec)
 	if err != nil {
 		if stale := w.cachedPreviewJPEG(); stale != nil {

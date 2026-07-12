@@ -60,6 +60,24 @@
       "main": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/401",
       "sub": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/402",
       "motion_masks": [{"x": 0.01, "y": 0.04, "w": 0.30, "h": 0.06}]
+    },
+    {
+      "name": "cam118",
+      "main": "rtsp://admin:L29543ED@10.3.1.55:554/cam/realmonitor?channel=1&subtype=0",
+      "sub": "rtsp://admin:L29543ED@10.3.1.55:554/cam/realmonitor?channel=1&subtype=1",
+      "motion_masks": [{"x": 0.71, "y": 0.03, "w": 0.29, "h": 0.06}]
+    },
+    {
+      "name": "cam56",
+      "main": "rtsp://admin:L246829E@10.3.1.56:554/cam/realmonitor?channel=1&subtype=0",
+      "sub": "rtsp://admin:L246829E@10.3.1.56:554/cam/realmonitor?channel=1&subtype=1",
+      "motion_masks": [{"x": 0.71, "y": 0.03, "w": 0.28, "h": 0.07}]
+    },
+    {
+      "name": "cam57",
+      "main": "rtsp://admin:L255CEA4@10.3.1.57:554/cam/realmonitor?channel=1&subtype=0",
+      "sub": "rtsp://admin:L255CEA4@10.3.1.57:554/cam/realmonitor?channel=1&subtype=1",
+      "motion_masks": [{"x": 0.71, "y": 0.03, "w": 0.29, "h": 0.06}]
     }
   ]
 }

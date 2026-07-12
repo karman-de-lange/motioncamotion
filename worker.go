@@ -44,7 +44,8 @@ type CameraWorker struct {
 	logQ    chan<- string
 }
 
-const previewAUKeep = 24
+// Keep enough AUs for H.264 looksee to always include an IDR (Imou ~15fps, GOP often 2–4s).
+const previewAUKeep = 64
 
 func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBlob int, cooldown time.Duration, detectQ chan<- DetectEvent, logQ chan<- string) *CameraWorker {
 	if sustainFrames < 1 {
