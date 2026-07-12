@@ -281,6 +281,16 @@ Headless: `"headless": true`. Fake motion (main app): `"fake_motion_min_sec"` / 
 
 ---
 
+## Hard constraints (agents & humans)
+
+- **No workarounds unless explicitly approved.** Do not fake the app when the real stack is missing.
+- **ffmpeg:** OK for **debugging only** (ad-hoc stream probes). **Never** in the app, harnesses that are part of the stack, or any product/runtime path. Same for go2rtc. Production decode = VPL/Go only.
+- **Looksee / motion / YOLO** = the real `motioncamotion` binary only. Not substitute apps or snapshot proxies posing as looksee.
+- **Build/run target:** Linux + Intel oneVPL (`libmfx-gen`, VAAPI) + OpenVINO. macOS cannot run this stack as built; say so instead of simulating the app.
+- If something does not build or cannot decode: fix or report the real dependency gap — do not paper over it.
+
+---
+
 ## One-line summary
 
 **Decode + motion + buffering viable for 7–16 cams; two-stage YOLO proven in `stagetest` with OpenVINO-in-Go (~400 ms/event on CPU). Next: GPU infer, walk-through validation, merge into main app.**

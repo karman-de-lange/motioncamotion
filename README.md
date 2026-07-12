@@ -1,6 +1,8 @@
 # motioncamotion
 
-Minimal Go RTSP stack for 16 Hikvision main streams with GPU H.265 decode and motion detection. No ffmpeg/go2rtc in this path. Hikvision ONVIF motion events are not an option.
+Minimal Go RTSP stack for 16 Hikvision main streams with GPU H.265 decode and motion detection. No ffmpeg/go2rtc in the app path (ffmpeg OK for ad-hoc debugging only). Hikvision ONVIF motion events are not an option.
+
+**Stack:** Linux + Intel oneVPL (VAAPI / `libmfx-gen`) + OpenVINO. Looksee, motion, and YOLO are the real binary only. See `AGENTS.md` and `docs/STATUS.md` (Hard constraints).
 
 ## Project layout
 
