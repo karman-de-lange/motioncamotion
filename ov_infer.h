@@ -26,4 +26,17 @@ int ov_infer_best_for_class(OVInfer *inf, const uint8_t *rgb, int class_id,
                             float *out_score, float *out_x1, float *out_y1,
                             float *out_x2, float *out_y2);
 
+#define OV_MAX_DETS 32
+
+typedef struct {
+	float score;
+	int class_id;
+	float x1, y1, x2, y2; /* model input pixels */
+} OVDet;
+
+/* All wanted-class dets with score >= conf, sorted by score desc, up to max_dets.
+ * out_n is number written (0 if none). Returns 0 on success. */
+int ov_infer_run_multi(OVInfer *inf, const uint8_t *rgb, float conf,
+                       float *out_ms, OVDet *out_dets, int max_dets, int *out_n);
+
 #endif

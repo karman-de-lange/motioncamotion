@@ -70,6 +70,51 @@ func runInfer(inf *C.OVInfer, rgb []byte, conf float64) (pass bool, ms, score fl
 	return cPass != 0, float64(cMs), float64(cScore), name, nil
 }
 
+// runInferMulti returns all wanted-class detections at/above conf (sorted by score).
+func runInferMulti(inf *C.OVInfer, rgb []byte, conf float64) (dets []DetBox, ms float64, err error) {
+	if inf == nil || len(rgb) == 0 {
+		return nil, 0, fmt.Errorf("infer not ready")
+	}
+	var cMs C.float
+	var cN C.int
+	var cDets [C.OV_MAX_DETS]C.OVDet
+	rc := C.ov_infer_run_multi(inf,
+		(*C.uint8_t)(unsafe.Pointer(&rgb[0])),
+		C.float(conf),
+		&cMs,
+		&cDets[0],
+		C.int(C.OV_MAX_DETS),
+		&cN)
+	if rc != 0 {
+		return nil, 0, fmt.Errorf("ov_infer_run_multi %d", int(rc))
+	}
+	n := int(cN)
+	if n < 0 {
+		n = 0
+	}
+	if n > int(C.OV_MAX_DETS) {
+		n = int(C.OV_MAX_DETS)
+	}
+	out := make([]DetBox, 0, n)
+	for i := 0; i < n; i++ {
+		d := cDets[i]
+		name := cocoNames[int(d.class_id)]
+		if name == "" {
+			name = fmt.Sprintf("cls%d", int(d.class_id))
+		}
+		out = append(out, DetBox{
+			Class:   name,
+			Score:   float64(d.score),
+			X1:      float64(d.x1),
+			Y1:      float64(d.y1),
+			X2:      float64(d.x2),
+			Y2:      float64(d.y2),
+			ClassID: int(d.class_id),
+		})
+	}
+	return out, float64(cMs), nil
+}
+
 func rgbMean(rgb []byte) int {
 	if len(rgb) == 0 {
 		return 0
@@ -81,7 +126,7 @@ func rgbMean(rgb []byte) int {
 	return sum / (len(rgb) / 3)
 }
 
-func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- string, clips *clipSaver, inf *C.OVInfer, yc yoloConfig) {
+func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig) {
 	device := C.GoString(C.ov_infer_device(inf))
 	logQ <- fmt.Sprintf("yolo ready device=%s sub_conf=%.2f main_conf=%.2f", device, yc.SubConf, yc.MainConf)
 
@@ -97,44 +142,85 @@ func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- 
 				subPass, subMS, subScore, subName, err := runInfer(inf, ev.SubRGB, yc.SubConf)
 				if err != nil {
 					logQ <- fmt.Sprintf("%s: stage1 error: %v", ev.Cam, err)
-					continue
-				}
-				logQ <- fmt.Sprintf("%s: stage1 sub infer=%.0fms pass=%v score=%.2f %s",
-					ev.Cam, subMS, subPass, subScore, subName)
-				if !subPass && !yc.ForceStage2 {
-					logQ <- fmt.Sprintf("%s: stage done (sub reject)", ev.Cam)
-					continue
+					// still try stage2 / save motion
+				} else {
+					logQ <- fmt.Sprintf("%s: stage1 sub infer=%.0fms pass=%v score=%.2f %s",
+						ev.Cam, subMS, subPass, subScore, subName)
+					if !subPass && !yc.ForceStage2 {
+						// Persist motion clip even on sub reject.
+						if store != nil {
+							if rec, err := store.SaveMotion(ev, nil); err != nil {
+								logQ <- fmt.Sprintf("%s: motion save failed: %v", ev.Cam, err)
+							} else {
+								logQ <- fmt.Sprintf("%s: motion saved %s (sub reject)", ev.Cam, rec.ID)
+							}
+						}
+						logQ <- fmt.Sprintf("%s: stage done (sub reject)", ev.Cam)
+						continue
+					}
 				}
 			}
 
-			// Stage 2: primary detect — decode main-ring AUs → YOLO (universal path).
+			// Stage 2: primary detect — decode main-ring AUs → multi YOLO.
 			mainRGB, frames, ok := decodeRGBBest(ev.Segments, inferSize, inferSize)
+			var stillPlain []byte
+			if ok {
+				stillPlain, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
+			}
+
+			// Always save motion clip (even if decode/YOLO fail).
+			var clipRel, videoRel string
+			if store != nil {
+				rec, err := store.SaveMotion(ev, stillPlain)
+				if err != nil {
+					logQ <- fmt.Sprintf("%s: motion save failed: %v", ev.Cam, err)
+				} else {
+					clipRel = rec.ClipRel
+					videoRel = rec.VideoRel
+					logQ <- fmt.Sprintf("%s: motion saved %s", ev.Cam, rec.ID)
+				}
+			}
+
 			if !ok {
 				logQ <- fmt.Sprintf("%s: stage2 main decode failed aus=%d", ev.Cam, len(ev.Segments))
 				continue
 			}
-			mainPass, mainMS, mainScore, mainName, err := runInfer(inf, mainRGB, yc.MainConf)
+
+			dets, mainMS, err := runInferMulti(inf, mainRGB, yc.MainConf)
 			if err != nil {
 				logQ <- fmt.Sprintf("%s: stage2 error: %v", ev.Cam, err)
 				continue
 			}
-			logQ <- fmt.Sprintf("%s: stage2 main frames=%d infer=%.0fms pass=%v score=%.2f %s",
-				ev.Cam, frames, mainMS, mainPass, mainScore, mainName)
+			mainPass := len(dets) > 0
+			topName := ""
+			topScore := 0.0
+			if mainPass {
+				topName = dets[0].Class
+				topScore = dets[0].Score
+			}
+			logQ <- fmt.Sprintf("%s: stage2 main frames=%d infer=%.0fms pass=%v dets=%d score=%.2f %s",
+				ev.Cam, frames, mainMS, mainPass, len(dets), topScore, topName)
 
 			if !mainPass {
 				logQ <- fmt.Sprintf("%s: stage done (main reject)", ev.Cam)
 				continue
 			}
 
-			if clips != nil && clips.want(ev.Cam) {
-				path, err := clips.save(ev)
+			// Annotated multi-box still for alerts.
+			ann, err := AnnotateRGB(mainRGB, inferSize, inferSize, dets, 90)
+			if err != nil {
+				logQ <- fmt.Sprintf("%s: annotate failed: %v", ev.Cam, err)
+				ann = stillPlain
+			}
+			if store != nil && len(ann) > 0 {
+				arec, err := store.SaveAlert(ev, ann, dets, topName, topScore, clipRel, videoRel)
 				if err != nil {
-					logQ <- fmt.Sprintf("%s: clip save failed: %v", ev.Cam, err)
-				} else if path != "" {
-					logQ <- fmt.Sprintf("%s: clip saved %s", ev.Cam, path)
+					logQ <- fmt.Sprintf("%s: alert save failed: %v", ev.Cam, err)
+				} else {
+					logQ <- fmt.Sprintf("%s: alert saved %s dets=%d", ev.Cam, arec.ID, len(dets))
 				}
 			}
-			logQ <- fmt.Sprintf("%s: stage done (detect %s %.2f)", ev.Cam, mainName, mainScore)
+			logQ <- fmt.Sprintf("%s: stage done (detect %s %.2f)", ev.Cam, topName, topScore)
 		}
 	}
 }

@@ -36,8 +36,15 @@ type Config struct {
 	FakeMotionMaxSec    int      `json:"fake_motion_max_sec"`
 	Headless            bool     `json:"headless"`
 	PreviewAddr         string   `json:"preview_addr"` // e.g. ":8088"; empty = off
-	ClipDir             string   `json:"clip_dir"`
-	ClipCams            []string `json:"clip_cams"`
+	ClipDir             string   `json:"clip_dir"`     // legacy; prefer media_dir
+	ClipCams            []string `json:"clip_cams"`    // legacy filter (unused if media_dir set)
+	MediaDir            string   `json:"media_dir"`    // root for motion clips + alert stills
+	MediaMaxAgeDays     int      `json:"media_max_age_days"` // prune older; 0 = off, default 7
+	MediaMaxMB          int      `json:"media_max_mb"`       // prune oldest when over size; 0 = off, default 2048
+	TLSDomain           string   `json:"tls_domain"`   // optional Let's Encrypt hostname
+	TLSEmail            string   `json:"tls_email"`    // ACME registration email
+	TLSCert             string   `json:"tls_cert"`     // optional PEM cert path
+	TLSKey              string   `json:"tls_key"`      // optional PEM key path
 	Cameras             []Camera `json:"cameras"`
 }
 
@@ -145,6 +152,23 @@ func loadConfig(path string) (Config, error) {
 	if cfg.PreviewAddr == "" {
 		cfg.PreviewAddr = ":8088"
 	}
+	if cfg.MediaDir == "" {
+		if cfg.ClipDir != "" {
+			cfg.MediaDir = cfg.ClipDir
+		} else {
+			cfg.MediaDir = "media"
+		}
+	}
+	if cfg.MediaMaxAgeDays == 0 {
+		cfg.MediaMaxAgeDays = 7
+	} else if cfg.MediaMaxAgeDays < 0 {
+		cfg.MediaMaxAgeDays = 0
+	}
+	if cfg.MediaMaxMB == 0 {
+		cfg.MediaMaxMB = 2048
+	} else if cfg.MediaMaxMB < 0 {
+		cfg.MediaMaxMB = 0
+	}
 	return cfg, nil
 }
 
@@ -181,16 +205,39 @@ func main() {
 	detectQ := make(chan DetectEvent, 64)
 	logQ := make(chan string, 256)
 
-	var clips *clipSaver
-	if cfg.ClipDir != "" && len(cfg.ClipCams) > 0 {
-		clips = newClipSaver(cfg.ClipDir, cfg.ClipCams)
+	store, err := newEventStore(cfg.MediaDir, cfg.MediaMaxAgeDays, cfg.MediaMaxMB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "media store: %v\n", err)
+		os.Exit(1)
 	}
+	if n, err := store.Prune(); err != nil {
+		fmt.Fprintf(os.Stderr, "media prune: %v\n", err)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "media prune: removed %d files\n", n)
+	}
+	go func() {
+		t := time.NewTicker(30 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n, err := store.Prune(); err != nil {
+					logQ <- fmt.Sprintf("media prune: %v", err)
+				} else if n > 0 {
+					logQ <- fmt.Sprintf("media prune: removed %d files", n)
+				}
+			}
+		}
+	}()
+
 	yc := yoloConfig{
 		SubConf:     cfg.SubConf,
 		MainConf:    cfg.MainConf,
 		ForceStage2: cfg.ForceStage2,
 	}
-	go runYOLOWorker(ctx, detectQ, logQ, clips, inf, yc)
+	go runYOLOWorker(ctx, detectQ, logQ, store, inf, yc)
 
 	workers := make([]*CameraWorker, len(cfg.Cameras))
 	for i, cam := range cfg.Cameras {
@@ -199,7 +246,7 @@ func main() {
 	}
 
 	if cfg.PreviewAddr != "" && cfg.PreviewAddr != "off" {
-		go runPreviewServer(ctx, cfg.PreviewAddr, workers, logQ)
+		go runWebServer(ctx, cfg.PreviewAddr, workers, store, logQ, cfg.TLSDomain, cfg.TLSEmail, cfg.TLSCert, cfg.TLSKey)
 	}
 
 	if cfg.FakeMotionMinSec > 0 && cfg.FakeMotionMaxSec >= cfg.FakeMotionMinSec {

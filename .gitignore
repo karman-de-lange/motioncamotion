@@ -29,3 +29,4 @@ __pycache__/
 
 # optional large model (keep if you want it tracked — comment out to commit)
 # models/*.onnx
+media/
