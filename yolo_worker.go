@@ -1,11 +1,10 @@
 package main
 
 /*
-#cgo CFLAGS: -I/usr/include/vpl
-#cgo LDFLAGS: -L/usr/lib -L/usr/lib/x86_64-linux-gnu -Wl,-rpath,/usr/lib:/usr/lib/x86_64-linux-gnu -lopenvino_c -lopenvino -lopenvino_onnx_frontend -Wl,-Bdynamic -ltbb -lmfx-gen -lstdc++
+#cgo CFLAGS: -I/home/karman/opt/openvino/runtime/include -I/usr/include
+#cgo LDFLAGS: -L/home/karman/opt/openvino/runtime/lib/intel64 -L/home/karman/opt/openvino/runtime/3rdparty/tbb/lib -L/usr/lib -L/usr/lib/x86_64-linux-gnu -Wl,-rpath,/home/karman/opt/openvino/runtime/lib/intel64:/home/karman/opt/openvino/runtime/3rdparty/tbb/lib -lopenvino_c -lopenvino -lopenvino_onnx_frontend -Wl,-Bdynamic -ltbb -ldl
 
 #include <stdlib.h>
-#include "vpl_decode.h"
 #include "ov_infer.h"
 */
 import "C"
@@ -82,42 +81,6 @@ func rgbMean(rgb []byte) int {
 	return sum / (len(rgb) / 3)
 }
 
-// decodeRGBBest picks the brightest successfully decoded frame (avoids black/partial).
-func decodeRGBBest(segments [][]byte, outW, outH int) ([]byte, int, bool) {
-	var dec *C.VPLDecoder
-	// Main ring is always H.265 in this deployment (Hik + Imou main).
-	if rc := C.vpl_decoder_new(&dec, C.VPL_CODEC_HEVC); rc != 0 {
-		return nil, 0, false
-	}
-	defer C.vpl_decoder_free(dec)
-
-	rgb := make([]byte, outW*outH*3)
-	best := make([]byte, outW*outH*3)
-	frames := 0
-	bestMean := -1
-	for _, seg := range segments {
-		if len(seg) == 0 {
-			continue
-		}
-		rc := C.vpl_decoder_rgb(dec,
-			(*C.uint8_t)(unsafe.Pointer(&seg[0])), C.size_t(len(seg)),
-			(*C.uint8_t)(unsafe.Pointer(&rgb[0])), C.int(len(rgb)),
-			C.int(outW), C.int(outH))
-		if rc == 0 {
-			frames++
-			mean := rgbMean(rgb)
-			if mean > bestMean {
-				bestMean = mean
-				copy(best, rgb)
-			}
-		}
-	}
-	if frames > 0 && bestMean > 0 {
-		return best, frames, true
-	}
-	return nil, 0, false
-}
-
 func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- string, clips *clipSaver, inf *C.OVInfer, yc yoloConfig) {
 	device := C.GoString(C.ov_infer_device(inf))
 	logQ <- fmt.Sprintf("yolo ready device=%s sub_conf=%.2f main_conf=%.2f", device, yc.SubConf, yc.MainConf)
@@ -144,7 +107,7 @@ func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- 
 				}
 			}
 
-			// Stage 2: decode main buffer → YOLO.
+			// Stage 2: primary detect — decode main-ring AUs → YOLO (universal path).
 			mainRGB, frames, ok := decodeRGBBest(ev.Segments, inferSize, inferSize)
 			if !ok {
 				logQ <- fmt.Sprintf("%s: stage2 main decode failed aus=%d", ev.Cam, len(ev.Segments))

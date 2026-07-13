@@ -1,21 +1,11 @@
 package main
 
-/*
-#cgo CFLAGS: -I/usr/include/vpl
-#cgo LDFLAGS: -lmfx-gen -lstdc++
-
-#include <stdlib.h>
-#include "vpl_decode.h"
-*/
-import "C"
-
 import (
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"time"
-	"unsafe"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
@@ -25,8 +15,6 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph265"
 	"github.com/pion/rtp"
 )
-
-const inferSize = 640
 
 func h264AUHasIDR(au [][]byte) bool {
 	for _, n := range au {
@@ -97,9 +85,9 @@ func (w *CameraWorker) runSub(ctx context.Context) {
 
 	var h265 *format.H265
 	if medi := desc.FindFormat(&h265); medi != nil {
-		w.setSubCodec(int(C.VPL_CODEC_HEVC))
+		w.setSubCodec(CodecHEVC)
 		// HEVC: prepend SDP VPS/SPS/PPS only when AU lacks in-band VPS (avoid double-inject).
-		w.runSubDecoded(ctx, c, desc, medi, h265, int(C.VPL_CODEC_HEVC),
+		w.runSubDecoded(ctx, c, desc, medi, h265, CodecHEVC,
 			func() (func(*rtp.Packet) ([][]byte, error), error) {
 				d, err := h265.CreateDecoder()
 				if err != nil {
@@ -127,12 +115,12 @@ func (w *CameraWorker) runSub(ctx context.Context) {
 
 	var h264 *format.H264
 	if medi := desc.FindFormat(&h264); medi != nil {
-		w.setSubCodec(int(C.VPL_CODEC_AVC))
+		w.setSubCodec(CodecAVC)
 		w.setSubH264Params(h264.SPS, h264.PPS)
-		// VPL H.264 breaks if SPS/PPS are re-injected on every frame after init.
+		// H.264: some backends break if SPS/PPS are re-injected on every frame after init.
 		// Prepend SDP params only until the first decoded frame, and on IDR thereafter.
 		var decReady bool
-		w.runSubDecoded(ctx, c, desc, medi, h264, int(C.VPL_CODEC_AVC),
+		w.runSubDecoded(ctx, c, desc, medi, h264, CodecAVC,
 			func() (func(*rtp.Packet) ([][]byte, error), error) {
 				d, err := h264.CreateDecoder()
 				if err != nil {
@@ -162,50 +150,6 @@ func (w *CameraWorker) runSub(ctx context.Context) {
 	fmt.Fprintf(os.Stderr, "%s sub: no H265/H264\n", w.cfg.Name)
 }
 
-// vplThumbFromAUs feeds AUs into a fresh VPL session; returns true if any thumb succeeded.
-// Keeps the last successful thumb in yOut (looksee-style multi-AU warm-up).
-func vplThumbFromAUs(codec int, aus [][]byte, yOut []byte) bool {
-	var tmp *C.VPLDecoder
-	if C.vpl_decoder_new(&tmp, C.int(codec)) != 0 {
-		return false
-	}
-	defer C.vpl_decoder_free(tmp)
-	ok := false
-	for _, a := range aus {
-		if len(a) == 0 {
-			continue
-		}
-		if C.vpl_decoder_thumb(tmp,
-			(*C.uint8_t)(unsafe.Pointer(&a[0])), C.size_t(len(a)),
-			(*C.uint8_t)(unsafe.Pointer(&yOut[0])), C.int(len(yOut))) == 0 {
-			ok = true
-		}
-	}
-	return ok
-}
-
-// vplRGBFromAUs mirrors vplThumbFromAUs for stage1 RGB (last successful frame kept).
-func vplRGBFromAUs(codec int, aus [][]byte, rgbOut []byte, outW, outH int) bool {
-	var tmp *C.VPLDecoder
-	if C.vpl_decoder_new(&tmp, C.int(codec)) != 0 {
-		return false
-	}
-	defer C.vpl_decoder_free(tmp)
-	ok := false
-	for _, a := range aus {
-		if len(a) == 0 {
-			continue
-		}
-		if C.vpl_decoder_rgb(tmp,
-			(*C.uint8_t)(unsafe.Pointer(&a[0])), C.size_t(len(a)),
-			(*C.uint8_t)(unsafe.Pointer(&rgbOut[0])), C.int(len(rgbOut)),
-			C.int(outW), C.int(outH)) == 0 {
-			ok = true
-		}
-	}
-	return ok
-}
-
 func (w *CameraWorker) runSubDecoded(
 	ctx context.Context,
 	c *gortsplib.Client,
@@ -219,15 +163,15 @@ func (w *CameraWorker) runSubDecoded(
 	onDecodedFrame func(), // optional (H.264: stop re-injecting SPS/PPS)
 	onHardErr func(),      // optional (H.264: re-allow SPS after decoder recreate)
 ) {
-	var dec *C.VPLDecoder
-	if rc := C.vpl_decoder_new(&dec, C.int(codec)); rc != 0 {
-		fmt.Fprintf(os.Stderr, "%s sub: vpl init %d codec=%d\n", w.cfg.Name, int(rc), codec)
+	dec, rc := NewFrameDecoder(codec)
+	if rc != 0 || dec == nil {
+		fmt.Fprintf(os.Stderr, "%s sub: decoder init %d codec=%d\n", w.cfg.Name, rc, codec)
 		return
 	}
 	// Closure so recreate can reassign dec and exit still frees the live session.
 	defer func() {
 		if dec != nil {
-			C.vpl_decoder_free(dec)
+			dec.Close()
 		}
 	}()
 
@@ -243,24 +187,27 @@ func (w *CameraWorker) runSubDecoded(
 	}
 
 	const (
-		moreDataStallN   = 45
-		oneShotAUWindow  = 12
-		oneShotMinGap    = 200 * time.Millisecond
-		recreateMinGap   = 500 * time.Millisecond
-		thumbGapRebase   = 500 * time.Millisecond // large gap → re-baseline SAD (no false 99%)
+		moreDataStallN = 45
+		recreateMinGap = 500 * time.Millisecond
+		// Large gap between live thumbs → clear thumb ring (avoid false 99% after stall).
+		thumbGapRebase = 2 * time.Second
 	)
 
-	var prevY [thumbSize]byte
-	var havePrev bool
+	// Temporal motion: mean(recent avg) vs mean(older at lag). See docs/MOTION_DESIGN.md.
+	tRing := newThumbRing(w.lagFrames + w.avgFrames + 8)
+	recentBuf := make([]byte, thumbSize)
+	olderBuf := make([]byte, thumbSize)
+
 	var loggedErr bool
-	var loggedOneShot bool
 	var lastRecreate time.Time
-	var lastOneShot time.Time
 	var lastThumbAt time.Time
 	var moreDataStreak int
 	var streak int
 	thumb := make([]byte, thumbSize)
-	rgbBuf := make([]byte, inferSize*inferSize*3)
+
+	// Rate log: AUs vs live thumbs per second (no oneshot path).
+	var auN, liveThumbN int
+	rateWindowStart := time.Now()
 
 	c.OnPacketRTP(medi, forma, func(pkt *rtp.Packet) {
 		if ctx.Err() != nil {
@@ -279,129 +226,97 @@ func (w *CameraWorker) runSubDecoded(
 		if len(bitstream) == 0 {
 			return
 		}
+		auN++
 
-		// Pre-H264 looksee: keep AUs in RAM; HTTP snap decodes on demand.
+		// Keep recent sub AUs for looksee HTTP snap only (not motion fallback).
 		w.setLatestSubAU(bitstream)
 
-		// Live VPL may be nil after a failed reinit until stream reconnects.
+		// Live decoder may be nil after a failed reinit until stream reconnects.
 		var rc int = 1
 		gotThumb := false
 		if dec != nil {
-			rc = int(C.vpl_decoder_thumb(dec,
-				(*C.uint8_t)(unsafe.Pointer(&bitstream[0])), C.size_t(len(bitstream)),
-				(*C.uint8_t)(unsafe.Pointer(&thumb[0])), C.int(len(thumb))))
-			gotThumb = rc == 0
+			rc = dec.Thumb(bitstream, thumb)
+			gotThumb = rc == DecOK
+			if gotThumb {
+				liveThumbN++
+			}
 		}
-		if rc == 1 {
+		if rc == DecMoreData {
 			moreDataStreak++
-		} else if rc == 0 {
+		} else if rc == DecOK {
 			moreDataStreak = 0
 		}
 
 		if !gotThumb {
-			if rc != 1 && rc != 0 {
+			if rc != DecMoreData && rc != DecOK {
 				if !loggedErr {
 					fmt.Fprintf(os.Stderr, "%s sub: thumb error %d\n", w.cfg.Name, rc)
 					loggedErr = true
 				}
 			}
-			// Stuck live session: hard error or long MORE_DATA streak.
-			stalled := rc != 1 || moreDataStreak >= moreDataStallN
+			// Stuck live session: hard error or long MORE_DATA streak → recreate live decoder.
+			stalled := rc != DecMoreData || moreDataStreak >= moreDataStallN
 			if stalled && time.Since(lastRecreate) >= recreateMinGap {
 				lastRecreate = time.Now()
 				moreDataStreak = 0
 				if dec != nil {
-					C.vpl_decoder_free(dec)
+					dec.Close()
 					dec = nil
 				}
-				if nrc := C.vpl_decoder_new(&dec, C.int(codec)); nrc != 0 {
-					fmt.Fprintf(os.Stderr, "%s sub: vpl reinit %d — reconnecting\n", w.cfg.Name, int(nrc))
+				nd, nrc := NewFrameDecoder(codec)
+				if nrc != 0 || nd == nil {
+					fmt.Fprintf(os.Stderr, "%s sub: decoder reinit %d — reconnecting\n", w.cfg.Name, nrc)
 					dec = nil
 					c.Close()
 					return
 				}
-				havePrev = false
+				dec = nd
+				tRing.clear()
 				streak = 0
-				fmt.Fprintf(os.Stderr, "%s sub: vpl recreated after stall\n", w.cfg.Name)
+				fmt.Fprintf(os.Stderr, "%s sub: decoder recreated after stall\n", w.cfg.Name)
 				if onHardErr != nil {
 					onHardErr()
 				}
 			}
-			// One-shot only after a real stall — not during normal pre-IDR MORE_DATA warm-up.
-			if !stalled {
-				return
-			}
-			if time.Since(lastOneShot) < oneShotMinGap {
-				return
-			}
-			lastOneShot = time.Now()
-			aus := w.copyLatestSubsN(oneShotAUWindow)
-			if len(aus) == 0 {
-				aus = [][]byte{bitstream}
-			}
-			if !vplThumbFromAUs(codec, aus, thumb) {
-				return
-			}
-			gotThumb = true
-			if !loggedOneShot {
-				fmt.Fprintf(os.Stderr, "%s sub: one-shot thumb after stall\n", w.cfg.Name)
-				loggedOneShot = true
-			}
+			return
 		}
 
-		if onDecodedFrame != nil && rc == 0 {
+		if onDecodedFrame != nil && rc == DecOK {
 			onDecodedFrame()
 		}
 
 		now := time.Now()
-		// Large gap between thumbs (stall / one-shot spacing): re-baseline, avoid 99% SAD spikes.
-		if havePrev && !lastThumbAt.IsZero() && now.Sub(lastThumbAt) > thumbGapRebase {
-			havePrev = false
+		if el := now.Sub(rateWindowStart); el >= time.Second {
+			sec := el.Seconds()
+			w.logQ <- fmt.Sprintf("%s: rate au=%.1f/s live_thumb=%.1f/s",
+				w.cfg.Name, float64(auN)/sec, float64(liveThumbN)/sec)
+			auN, liveThumbN = 0, 0
+			rateWindowStart = now
+		}
+		if !lastThumbAt.IsZero() && now.Sub(lastThumbAt) > thumbGapRebase {
+			tRing.clear()
 			streak = 0
 		}
 		lastThumbAt = now
 
-		if !havePrev {
-			copy(prevY[:], thumb)
-			havePrev = true
+		tRing.push(thumb)
+		sad, blob, ready := motionScoreTemporal(tRing, w.avgFrames, w.lagFrames, w.ignore, recentBuf, olderBuf)
+		if !ready {
 			return
 		}
 
-		sad, changed := sadMotion(prevY[:], thumb, w.ignore)
-		blob := maxBlob(changed, thumbW, thumbH)
 		if sad >= w.sadCutoff && blob >= w.minBlob {
 			if streak < w.sustainFrames {
 				streak++
 			}
 			if streak >= w.sustainFrames && w.tryMotionFire() {
-				var subRGB []byte
-				// Live RGB if healthy; else multi-AU one-shot (same window as thumb).
-				rgbOK := false
-				if dec != nil && rc == 0 {
-					if C.vpl_decoder_rgb(dec,
-						(*C.uint8_t)(unsafe.Pointer(&bitstream[0])), C.size_t(len(bitstream)),
-						(*C.uint8_t)(unsafe.Pointer(&rgbBuf[0])), C.int(len(rgbBuf)),
-						C.int(inferSize), C.int(inferSize)) == 0 {
-						rgbOK = true
-					}
-				}
-				if !rgbOK {
-					aus := w.copyLatestSubsN(oneShotAUWindow)
-					if len(aus) == 0 {
-						aus = [][]byte{bitstream}
-					}
-					rgbOK = vplRGBFromAUs(codec, aus, rgbBuf, inferSize, inferSize)
-				}
-				if rgbOK {
-					subRGB = make([]byte, len(rgbBuf))
-					copy(subRGB, rgbBuf)
-				}
-				w.enqueueDetect("motion", sad, subRGB)
+				// Skip re-feeding live decoder for RGB (pollutes NVDEC session).
+				// Stage2 main decode remains the primary detect path.
+				w.enqueueDetect("motion", sad, nil)
 			}
 		} else {
 			streak = 0
 		}
-		copy(prevY[:], thumb)
 	})
 
 	if _, err = c.Play(nil); err != nil {

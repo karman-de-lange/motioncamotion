@@ -29,6 +29,8 @@ Goal: beat Frigate’s limitation — **motion on sub-stream, buffer main-stream
 
 ## Architecture (as coded)
 
+**Platform-universal rules** (primary detect, decode backends, vocabulary): see [`UNIVERSAL_CORE.md`](UNIVERSAL_CORE.md).
+
 ### Main app (`motioncamotion`)
 
 ```
@@ -284,9 +286,9 @@ Headless: `"headless": true`. Fake motion (main app): `"fake_motion_min_sec"` / 
 ## Hard constraints (agents & humans)
 
 - **No workarounds unless explicitly approved.** Do not fake the app when the real stack is missing.
-- **ffmpeg:** OK for **debugging only** (ad-hoc stream probes). **Never** in the app, harnesses that are part of the stack, or any product/runtime path. Same for go2rtc. Production decode = VPL/Go only.
-- **Looksee / motion / YOLO** = the real `motioncamotion` binary only. Not substitute apps or snapshot proxies posing as looksee.
-- **Build/run target:** Linux + Intel oneVPL (`libmfx-gen`, VAAPI) + OpenVINO. macOS cannot run this stack as built; say so instead of simulating the app.
+- **ffmpeg:** OK for **debugging only** (ad-hoc stream probes). **Never** in the app, harnesses that are part of the stack, or any product/runtime path. Same for go2rtc. Production decode = platform `FrameDecoder` backend (default: Intel VPL); never ffmpeg.
+- **Looksee / motion / YOLO** = the real `motioncamotion` binary only. Not substitute apps or snapshot proxies posing as looksee. Primary detect is universal (main-ring AUs → decode → YOLO); see `UNIVERSAL_CORE.md`.
+- **Build/run target (production today):** Linux + Intel oneVPL (`libmfx-gen`, VAAPI) + OpenVINO. **NVDEC** (`-tags nvidia_nvdec`) is implemented for CUDA/WSL (RTX). Darwin VideoToolbox remains a stub. Do not fake looksee when decode init fails.
 - If something does not build or cannot decode: fix or report the real dependency gap — do not paper over it.
 
 ---

@@ -1,14 +1,5 @@
 package main
 
-/*
-#cgo CFLAGS: -I/usr/include/vpl
-#cgo LDFLAGS: -lmfx-gen -lstdc++
-
-#include <stdlib.h>
-#include "vpl_decode.h"
-*/
-import "C"
-
 import (
 	"bytes"
 	"context"
@@ -19,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 )
 
 const (
@@ -28,7 +18,7 @@ const (
 	jpegQuality = 70
 )
 
-// Serialize on-demand looksee decodes (one VPL session at a time).
+// Serialize on-demand looksee decodes (one session at a time).
 var previewDecMu sync.Mutex
 
 func encodePreviewJPEG(rgb []byte, width, height int) ([]byte, error) {
@@ -80,7 +70,7 @@ func prepareLookseeAUs(aus [][]byte, codec int, sps, pps []byte) [][]byte {
 	if len(aus) == 0 {
 		return aus
 	}
-	if codec != int(C.VPL_CODEC_AVC) {
+	if codec != CodecAVC {
 		return aus
 	}
 	start := -1
@@ -106,48 +96,9 @@ func prepareLookseeAUs(aus [][]byte, codec int, sps, pps []byte) [][]byte {
 	return out
 }
 
-// Looksee: feed recent sub AUs into a fresh VPL decoder → RGB → JPEG.
-// codec selects HEVC vs AVC session; only AVC uses sps/pps injection above.
-func decodeAUsToRGBFit(aus [][]byte, maxW, maxH, codec int) (rgb []byte, outW, outH int, err error) {
-	if len(aus) == 0 {
-		return nil, 0, 0, fmt.Errorf("no sub frame yet")
-	}
-	previewDecMu.Lock()
-	defer previewDecMu.Unlock()
-
-	var dec *C.VPLDecoder
-	if rc := C.vpl_decoder_new(&dec, C.int(codec)); rc != 0 {
-		return nil, 0, 0, fmt.Errorf("vpl_decoder_new %d", int(rc))
-	}
-	defer C.vpl_decoder_free(dec)
-
-	buf := make([]byte, maxW*maxH*3)
-	var lastRC int
-	var cW, cH C.int
-	for _, au := range aus {
-		if len(au) == 0 {
-			continue
-		}
-		rc := C.vpl_decoder_rgb_fit(dec,
-			(*C.uint8_t)(unsafe.Pointer(&au[0])), C.size_t(len(au)),
-			(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.int(len(buf)),
-			C.int(maxW), C.int(maxH), &cW, &cH)
-		lastRC = int(rc)
-		if rc == 0 {
-			w, h := int(cW), int(cH)
-			out := make([]byte, w*h*3)
-			copy(out, buf[:w*h*3])
-			return out, w, h, nil
-		}
-	}
-	if lastRC == 1 {
-		return nil, 0, 0, fmt.Errorf("no frame yet")
-	}
-	return nil, 0, 0, fmt.Errorf("vpl_decoder_rgb_fit %d", lastRC)
-}
-
 func (w *CameraWorker) previewJPEGBytes() ([]byte, error) {
-	if jpg := w.cachedPreviewJPEGFresh(2 * time.Second); jpg != nil {
+	// Short cache: looksee should feel near-live; 2s made tiles feel stuck.
+	if jpg := w.cachedPreviewJPEGFresh(400 * time.Millisecond); jpg != nil {
 		return jpg, nil
 	}
 
@@ -156,8 +107,8 @@ func (w *CameraWorker) previewJPEGBytes() ([]byte, error) {
 		return nil, fmt.Errorf("warming up — wait 1–2s")
 	}
 	codec := w.SubCodec()
-	if codec != int(C.VPL_CODEC_AVC) {
-		codec = int(C.VPL_CODEC_HEVC)
+	if codec != CodecAVC {
+		codec = CodecHEVC
 	}
 	sps, pps := w.SubH264Params()
 	aus = prepareLookseeAUs(aus, codec, sps, pps)
@@ -228,7 +179,7 @@ a{color:#8cf}
 		b.WriteString(`</div>
 <script>
 (function(){
-  var OK_MS=2500, ERR_MS=1200;
+  var OK_MS=800, ERR_MS=600;
   function tick(img){
     var cam=img.getAttribute('data-cam'); if(!cam) return;
     var age=document.querySelector('[data-age="'+cam+'"]');

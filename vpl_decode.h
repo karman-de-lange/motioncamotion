@@ -3,8 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define THUMB_W 64
-#define THUMB_H 64
+#define THUMB_W 128
+#define THUMB_H 128
 #define THUMB_Y_SIZE (THUMB_W * THUMB_H)
 
 /* Codec for vpl_decoder_new: HEVC (H.265) or AVC (H.264). */

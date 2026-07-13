@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	thumbW     = 64
-	thumbH     = 64
+	thumbW     = 128
+	thumbH     = 128
 	thumbSize  = thumbW * thumbH
 	noiseFloor = 12
 )

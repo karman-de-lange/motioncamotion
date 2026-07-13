@@ -1,0 +1,21 @@
+# Local RTSP server for replaying captured clips as dummy cams.
+# Not part of the app product path — test tooling only (ffmpeg/mediamtx outside motioncamotion).
+#
+#   ./testdata/scripts/serve_clips.sh empty   # or: walk
+#   ./motioncamotion cameras_dummy_clips.json
+
+logLevel: warn
+api: no
+rtsp: yes
+rtspAddress: :8556
+rtpAddress: :8000
+rtcpAddress: :8001
+paths:
+  nvr161_2_main:
+    source: publisher
+  nvr161_2_sub:
+    source: publisher
+  nvr161_3_main:
+    source: publisher
+  nvr161_3_sub:
+    source: publisher

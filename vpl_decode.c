@@ -1,3 +1,5 @@
+//go:build !nvidia_nvdec && !darwin
+
 #include "vpl_decode.h"
 
 #include <stdint.h>

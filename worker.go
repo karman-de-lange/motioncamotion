@@ -26,6 +26,8 @@ type CameraWorker struct {
 	sadCutoff     float64
 	sustainFrames int
 	minBlob       int
+	avgFrames     int // temporal mean window (noise kill)
+	lagFrames     int // older window offset (slow human motion)
 	cooldown      time.Duration
 	ignore        []bool
 	status        string
@@ -33,7 +35,7 @@ type CameraWorker struct {
 	mu            sync.Mutex
 	ring          *ringBuffer
 	lastMotionAt  time.Time
-	subCodec      int // VPL_CODEC_HEVC or VPL_CODEC_AVC
+	subCodec      int // CodecHEVC or CodecAVC
 	subSPS        []byte // H.264 SDP params for preview / IDR
 	subPPS        []byte
 	latestSubs    [][]byte // recent sub annex-B AUs for on-demand web JPEG
@@ -48,18 +50,26 @@ type CameraWorker struct {
 // Keep enough AUs for H.264 looksee to always include an IDR (Imou ~15fps, GOP often 2–4s).
 const previewAUKeep = 64
 
-func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBlob int, cooldown time.Duration, detectQ chan<- DetectEvent, logQ chan<- string) *CameraWorker {
+func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBlob, avgFrames, lagFrames int, cooldown time.Duration, detectQ chan<- DetectEvent, logQ chan<- string) *CameraWorker {
 	if sustainFrames < 1 {
 		sustainFrames = 1
 	}
 	if minBlob < 1 {
 		minBlob = 1
 	}
+	if avgFrames < 1 {
+		avgFrames = 3
+	}
+	if lagFrames < avgFrames {
+		lagFrames = avgFrames
+	}
 	return &CameraWorker{
 		cfg:           cam,
 		sadCutoff:     sadCutoff,
 		sustainFrames: sustainFrames,
 		minBlob:       minBlob,
+		avgFrames:     avgFrames,
+		lagFrames:     lagFrames,
 		cooldown:      cooldown,
 		ignore:        buildIgnoreMask(cam.MotionMasks),
 		status:        "reconnecting",

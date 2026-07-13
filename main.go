@@ -24,6 +24,8 @@ type Config struct {
 	MotionSustainFrames int      `json:"motion_sustain_frames"` // consecutive SAD hits; default 3
 	MotionCooldownSec   int      `json:"motion_cooldown_sec"`   // per-cam silence after fire; default 3
 	MotionMinBlob       int      `json:"motion_min_blob"`       // min connected changed cells; default 8
+	MotionAvgFrames     int      `json:"motion_avg_frames"`     // mean last N thumbs (noise); default 3
+	MotionLagFrames     int      `json:"motion_lag_frames"`     // older window start (slow motion); default 8
 	Model               string   `json:"model"`
 	Device              string   `json:"device"`
 	SubConf             float64  `json:"sub_conf"`
@@ -122,6 +124,12 @@ func loadConfig(path string) (Config, error) {
 	if cfg.MotionMinBlob <= 0 {
 		cfg.MotionMinBlob = 8
 	}
+	if cfg.MotionAvgFrames <= 0 {
+		cfg.MotionAvgFrames = 3
+	}
+	if cfg.MotionLagFrames <= 0 {
+		cfg.MotionLagFrames = 8
+	}
 	if cfg.Model == "" {
 		cfg.Model = "models/yolov8n.onnx"
 	}
@@ -186,7 +194,7 @@ func main() {
 
 	workers := make([]*CameraWorker, len(cfg.Cameras))
 	for i, cam := range cfg.Cameras {
-		workers[i] = NewCameraWorker(cam, sadCutoff, maxBuf, cfg.MotionSustainFrames, cfg.MotionMinBlob, cooldown, detectQ, logQ)
+		workers[i] = NewCameraWorker(cam, sadCutoff, maxBuf, cfg.MotionSustainFrames, cfg.MotionMinBlob, cfg.MotionAvgFrames, cfg.MotionLagFrames, cooldown, detectQ, logQ)
 		go workers[i].Run(ctx)
 	}
 
@@ -334,7 +342,7 @@ func runHeadless(ctx context.Context, cancel context.CancelFunc, logQ <-chan str
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				fmt.Printf("[%3.0fs] cpu=%.1f%%\n", time.Since(startAt).Seconds(), sampler.Percent())
+				fmt.Printf("%s [%3.0fs] cpu=%.1f%%\n", time.Now().Format("15:04:05"), time.Since(startAt).Seconds(), sampler.Percent())
 			}
 		}
 	}()
@@ -342,10 +350,10 @@ func runHeadless(ctx context.Context, cancel context.CancelFunc, logQ <-chan str
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("cpu avg: %.1f%%  elapsed: %.0fs\n", sampler.Percent(), time.Since(startAt).Seconds())
+			fmt.Printf("%s cpu avg: %.1f%%  elapsed: %.0fs\n", time.Now().Format("15:04:05"), sampler.Percent(), time.Since(startAt).Seconds())
 			return
 		case msg := <-logQ:
-			fmt.Println(msg)
+			fmt.Printf("%s %s\n", time.Now().Format("15:04:05"), msg)
 		}
 	}
 }

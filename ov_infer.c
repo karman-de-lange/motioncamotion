@@ -31,12 +31,16 @@ static int class_wanted(int cls) {
 }
 
 static void load_plugins(ov_core_t *core) {
-	const char *dir = "/usr/lib/openvino-2025.4.0";
+	/* Prefer env (user-local install); fall back to distro path. */
+	const char *dir = getenv("OPENVINO_LIB_DIR");
+	if (!dir || !dir[0]) {
+		dir = "/usr/lib/openvino-2025.4.0";
+	}
 	const char *plugins[] = {
 		"libopenvino_intel_cpu_plugin.so",
 		"libopenvino_intel_gpu_plugin.so",
 	};
-	char path[256];
+	char path[512];
 	for (size_t i = 0; i < sizeof(plugins) / sizeof(plugins[0]); i++) {
 		snprintf(path, sizeof(path), "%s/%s", dir, plugins[i]);
 		ov_core_add_extension(core, path);
