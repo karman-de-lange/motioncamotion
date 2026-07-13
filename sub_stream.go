@@ -313,6 +313,10 @@ func (w *CameraWorker) runSubDecoded(
 				// Skip re-feeding live decoder for RGB (pollutes NVDEC session).
 				// Stage2 main decode remains the primary detect path.
 				w.enqueueDetect("motion", sad, nil)
+				// Re-baseline: lag window would otherwise stay "hot" for seconds and
+				// re-fire every cooldown on outdoor IR noise.
+				tRing.clear()
+				streak = 0
 			}
 		} else {
 			streak = 0

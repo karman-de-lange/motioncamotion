@@ -220,26 +220,20 @@ func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, 
 	return rec, nil
 }
 
-// remuxClipToMP4 builds a progressive MP4 for in-browser playback.
+// remuxClipToMP4 builds a progressive H.264 MP4 for in-browser playback.
+// Always re-encodes to AVC: HEVC-in-MP4 copy is not playable in most Chrome/Firefox builds,
+// and default framerate on elementary streams often halves perceived duration (e.g. 5s→2.5s).
 func remuxClipToMP4(h265Path, mp4Path string) error {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	// Prefer copy into MP4 when the elementary stream is clean; fall back to H.264 for broad browser support.
-	cmdCopy := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error",
-		"-y", "-f", "hevc", "-i", h265Path,
-		"-c", "copy", "-an", "-movflags", "+faststart", mp4Path)
-	if err := cmdCopy.Run(); err == nil {
-		if st, err := os.Stat(mp4Path); err == nil && st.Size() > 0 {
-			return nil
-		}
-	}
 	_ = os.Remove(mp4Path)
+	// Hik main is typically 15fps; -r on input sets timestamps for annex-B without VFR mess.
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error",
-		"-y", "-f", "hevc", "-i", h265Path,
-		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+		"-y", "-fflags", "+genpts", "-r", "15", "-f", "hevc", "-i", h265Path,
+		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
 		"-an", "-movflags", "+faststart", mp4Path)
 	if err := cmd.Run(); err != nil {
 		_ = os.Remove(mp4Path)

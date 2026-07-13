@@ -380,17 +380,26 @@ tbody tr.selected{background:rgba(91,159,212,.14)}
 
 const webAppJS = `
 (function(){
-  var OK_MS=900, ERR_MS=700;
+  var OK_MS=1500, ERR_MS=2000;
   function tick(img){
     var cam=img.getAttribute('data-cam'); if(!cam) return;
+    // One in-flight snap per tile — avoids connection storms when decode is slow.
+    if(img.getAttribute('data-busy')==='1') return;
+    if(document.hidden){
+      setTimeout(function(){tick(img);}, OK_MS);
+      return;
+    }
     var age=document.querySelector('[data-age="'+cam+'"]');
+    img.setAttribute('data-busy','1');
     var probe=new Image();
     probe.onload=function(){
       img.src=probe.src;
+      img.setAttribute('data-busy','0');
       if(age) age.textContent='Live';
       setTimeout(function(){tick(img);}, OK_MS);
     };
     probe.onerror=function(){
+      img.setAttribute('data-busy','0');
       if(age) age.textContent='Waiting…';
       setTimeout(function(){tick(img);}, ERR_MS);
     };
@@ -460,7 +469,8 @@ const webAppJS = `
     }
     var h='<div class="detail-inner">';
     if(e.video){
-      h+='<video controls playsinline preload="metadata" src="/media/'+esc(e.video)+'"></video>';
+      h+='<video id="detail-video" controls playsinline preload="metadata" src="/media/'+esc(e.video)+'"></video>';
+      if(e.still) h+='<img id="detail-still-fallback" src="/media/'+esc(e.still)+'" alt="Still" style="display:none">';
     } else if(e.still){
       h+='<img src="/media/'+esc(e.still)+'" alt="Preview">';
     } else {
@@ -481,6 +491,13 @@ const webAppJS = `
     }
     h+='</div></div>';
     d.innerHTML=h;
+    var vid=document.getElementById('detail-video');
+    var fb=document.getElementById('detail-still-fallback');
+    if(vid){
+      vid.addEventListener('error', function(){
+        if(fb){ vid.style.display='none'; fb.style.display='block'; }
+      });
+    }
   }
 
   var conn=document.getElementById('conn');
@@ -488,6 +505,7 @@ const webAppJS = `
   var banner=document.getElementById('banner');
   var toast=document.getElementById('toast');
   var es;
+  var sseBackoff=1000;
   function setConn(text, cls){
     conn.textContent=text;
     pill.classList.remove('ok','bad');
@@ -496,7 +514,7 @@ const webAppJS = `
   function connectSSE(){
     if(es) try{es.close();}catch(e){}
     es=new EventSource('/api/events/stream');
-    es.addEventListener('hello', function(){ setConn('Live', 'ok'); });
+    es.addEventListener('hello', function(){ setConn('Live', 'ok'); sseBackoff=1000; });
     es.addEventListener('event', function(ev){
       try{
         var e=JSON.parse(ev.data);
@@ -516,7 +534,13 @@ const webAppJS = `
         }
       }catch(err){}
     });
-    es.onerror=function(){ setConn('Reconnecting…', 'bad'); };
+    es.onerror=function(){
+      setConn('Reconnecting…', 'bad');
+      try{es.close();}catch(e){}
+      // Manual reconnect with backoff — browser auto-reconnect can thrash.
+      setTimeout(connectSSE, sseBackoff);
+      sseBackoff=Math.min(sseBackoff*2, 15000);
+    };
   }
   connectSSE();
 

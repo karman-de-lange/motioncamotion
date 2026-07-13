@@ -46,17 +46,20 @@ sub RTSP → AU → FrameDecoder.Thumb → Y thumb (128×128)
 | Param | Default | Meaning @ ~10 fps |
 |-------|---------|-------------------|
 | `motion_avg_frames` (A) | **3** | Mean last 3 thumbs (~0.3 s) — kills 1-frame glitches |
-| `motion_lag_frames` (L) | **8** | Older window starts ~0.8 s ago |
+| `motion_lag_frames` (L) | **10** | Older window starts ~1.0 s ago @10fps |
 | Compare | mean(recent A) vs mean(older A at lag L) | “What changed over ~1 s” |
 
 Humans move across that window; single-frame birds often don’t survive both averages + sustain.
 
+**Outdoor IR note:** lag-window SAD on a “static” scene still sits ~1–3% (noise/compression). Threshold must sit **above** that floor (default **4%**), or every cooldown will re-fire. After a fire, **clear the thumb ring** so the lag baseline resets.
+
 ## Gates (unchanged ideas, retunable)
 
-1. SAD% ≥ `threshold * 100` (noise floor still 12 per cell before counting).
-2. max blob ≥ `motion_min_blob`.
-3. sustain consecutive **hits** (default 2).
-4. per-cam cooldown.
+1. SAD% ≥ `threshold * 100` (noise floor still 12 per cell before counting). Default threshold **0.04** (4%) for lag mode.
+2. max blob ≥ `motion_min_blob` (default **48** at 128×128 — not 4).
+3. sustain consecutive **hits** (default **3**).
+4. per-cam cooldown (default **20s**).
+5. On fire: clear thumb ring (re-baseline).
 
 ## CPU budget (order of magnitude)
 

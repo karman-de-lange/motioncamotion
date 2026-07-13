@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	snapshotDur = 5 * time.Second
-	ringKeepDur = 10 * time.Second
+	// Pre-trigger main-ring slice written on motion (wall-clock AU timestamps).
+	snapshotDur = 10 * time.Second
+	// Keep more than snapshot so the window is full when motion fires.
+	ringKeepDur = 20 * time.Second
 )
 
 type CameraWorker struct {
