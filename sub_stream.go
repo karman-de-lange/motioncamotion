@@ -210,6 +210,7 @@ func (w *CameraWorker) runSubDecoded(
 	var lastThumbAt time.Time
 	var moreDataStreak int
 	var streak int
+	var quietN int
 	thumb := make([]byte, thumbSize)
 
 	// Rate log: AUs vs live thumbs per second (no oneshot path).
@@ -314,20 +315,30 @@ func (w *CameraWorker) runSubDecoded(
 
 		compactOK := w.minCompact <= 0 || compactness(blob, nCh) >= w.minCompact
 		if sad >= w.sadCutoff && blob >= w.minBlob && compactOK {
+			quietN = 0
 			if streak < w.sustainFrames {
 				streak++
 			}
-			if streak >= w.sustainFrames && w.tryMotionFire() {
-				// Skip re-feeding live decoder for RGB (pollutes NVDEC session).
-				// Stage2 main decode remains the primary detect path.
-				w.enqueueDetect("motion", sad, nil)
-				// Re-baseline: lag window would otherwise stay "hot" for seconds and
-				// re-fire every cooldown on outdoor IR noise.
+			if streak >= w.sustainFrames {
+				kind := sampleHot
+				if !w.episode {
+					kind = sampleOpen
+					w.episode = true
+				}
+				w.enqueueDetect(kind, "motion", sad, nil)
 				tRing.clear()
 				streak = 0
 			}
 		} else {
 			streak = 0
+			if w.episode {
+				quietN++
+				if quietN >= w.sustainFrames {
+					w.enqueueDetect(sampleClose, "motion", sad, nil)
+					w.episode = false
+					quietN = 0
+				}
+			}
 		}
 	})
 

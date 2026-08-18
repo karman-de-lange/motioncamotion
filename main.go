@@ -128,10 +128,8 @@ func loadConfig(path string) (Config, error) {
 	if cfg.MotionSustainFrames <= 0 {
 		cfg.MotionSustainFrames = 3
 	}
-	// 0 / omitted → 3s; negative → off.
-	if cfg.MotionCooldownSec == 0 {
-		cfg.MotionCooldownSec = 1
-	} else if cfg.MotionCooldownSec < 0 {
+	// 0 = off (YOLO admission is load-based, not a motion mute).
+	if cfg.MotionCooldownSec < 0 {
 		cfg.MotionCooldownSec = 0
 	}
 	if cfg.MotionMinBlob <= 0 {
@@ -257,8 +255,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	detectQ := make(chan DetectEvent, 64)
+	detectQ := make(chan DetectEvent, 16)
 	logQ := make(chan string, 256)
+	cpu := &cpuSampler{}
+	adm := newAdmissions(detectQ, cpu)
 
 	store, err := newEventStore(cfg.MediaDir, cfg.MediaMaxAgeDays, cfg.MediaMaxMB)
 	if err != nil {
@@ -300,6 +300,7 @@ func main() {
 			cam.MotionMinCompact = cfg.MotionMinCompact
 		}
 		workers[i] = NewCameraWorker(cam, sadCutoff, maxBuf, cfg.MotionSustainFrames, cfg.MotionMinBlob, cfg.MotionAvgFrames, cfg.MotionLagFrames, cooldown, detectQ, logQ)
+		workers[i].adm = adm
 		go workers[i].Run(ctx)
 	}
 

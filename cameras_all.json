@@ -118,7 +118,7 @@
     },
     {
       "main": "rtsp://admin:L29543ED@10.3.1.55:554/cam/realmonitor?channel=1\u0026subtype=0",
-      "motion_cooldown_sec": 1,
+      "motion_cooldown_sec": 0,
       "motion_masks": [
         {
           "h": 0.06,
@@ -135,7 +135,7 @@
     },
     {
       "main": "rtsp://admin:L246829E@10.3.1.56:554/cam/realmonitor?channel=1\u0026subtype=0",
-      "motion_cooldown_sec": 1,
+      "motion_cooldown_sec": 0,
       "motion_masks": [
         {
           "h": 0.07,
@@ -152,7 +152,7 @@
     },
     {
       "main": "rtsp://admin:L255CEA4@10.3.1.57:554/cam/realmonitor?channel=1\u0026subtype=0",
-      "motion_cooldown_sec": 1,
+      "motion_cooldown_sec": 0,
       "motion_masks": [
         {
           "h": 0.06,
@@ -177,7 +177,7 @@
   "media_max_age_days": 7,
   "media_max_mb": 8192,
   "model": "models/yolov8n.onnx",
-  "motion_cooldown_sec": 1,
+  "motion_cooldown_sec": 0,
   "motion_min_blob": 6,
   "motion_sustain_frames": 2,
   "preview_addr": ":8088",

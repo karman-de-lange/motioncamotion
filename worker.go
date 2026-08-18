@@ -47,7 +47,8 @@ type CameraWorker struct {
 	previewJPEG      []byte
 	previewJPEGAt    time.Time
 	afterLookseeCopy func() // test hook: runs after snapshot, before decode
-	detectBusy       bool   // one YOLO sample in flight for this cam
+	adm              *admissions
+	episode          bool
 
 	detectQ chan<- DetectEvent
 	logQ    chan<- string
@@ -485,27 +486,11 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 	}
 }
 
-func (w *CameraWorker) clearDetectBusy() {
-	w.mu.Lock()
-	w.detectBusy = false
-	w.mu.Unlock()
-}
-
-func (w *CameraWorker) enqueueDetect(label string, sad float64, subRGB []byte) {
-	w.mu.Lock()
-	if w.detectBusy {
-		w.mu.Unlock()
-		return
-	}
-	w.detectBusy = true
-	w.mu.Unlock()
-
+func (w *CameraWorker) enqueueDetect(kind sampleKind, label string, sad float64, subRGB []byte) {
 	segments := w.ring.snapshot(snapshotDur)
 	if len(segments) == 0 {
-		w.clearDetectBusy()
 		return
 	}
-
 	ev := DetectEvent{
 		Cam:      w.cfg.Name,
 		At:       time.Now(),
@@ -513,19 +498,23 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, subRGB []byte) {
 		SubRGB:   subRGB,
 		SAD:      sad,
 		Label:    label,
-		done:     w.clearDetectBusy,
 	}
-
-	go func(ev DetectEvent) {
-		if sad >= 0 {
-			w.logQ <- fmt.Sprintf("%s: %s sad=%.1f%% queued %d aus %.1fMB", ev.Cam, label, sad, len(ev.Segments), eventMB(ev))
-		} else {
-			w.logQ <- fmt.Sprintf("%s: %s queued %d aus %.1fMB", ev.Cam, label, len(ev.Segments), eventMB(ev))
-		}
+	ok := true
+	if w.adm != nil {
+		ok = w.adm.submit(w.cfg.Name, kind, ev)
+	} else if w.detectQ != nil {
 		w.detectQ <- ev
-	}(ev)
+	}
+	if !ok || w.logQ == nil {
+		return
+	}
+	if sad >= 0 {
+		w.logQ <- fmt.Sprintf("%s: %s sad=%.1f%% queued %d aus %.1fMB", ev.Cam, label, sad, len(ev.Segments), eventMB(ev))
+	} else {
+		w.logQ <- fmt.Sprintf("%s: %s queued %d aus %.1fMB", ev.Cam, label, len(ev.Segments), eventMB(ev))
+	}
 }
 
 func (w *CameraWorker) FakeMotion() {
-	w.enqueueDetect("fake", -1, nil)
+	w.enqueueDetect(sampleOpen, "fake", -1, nil)
 }

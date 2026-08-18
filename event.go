@@ -9,7 +9,8 @@ type DetectEvent struct {
 	SubRGB   []byte // optional 640×640 RGB from sub at trigger time (stage1)
 	SAD      float64
 	Label    string
-	done     func() // one-in-flight YOLO slot for this cam
+	kind     sampleKind
+	done     func()
 }
 
 func (ev DetectEvent) finish() {
