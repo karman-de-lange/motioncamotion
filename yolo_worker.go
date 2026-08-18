@@ -25,7 +25,18 @@ type yoloConfig struct {
 var cocoNames = map[int]string{
 	0:  "person",
 	2:  "car",
+	5:  "bus",
+	7:  "truck",
+	14: "bird",
 	15: "cat",
+	16: "dog",
+	17: "horse",
+	18: "sheep",
+	19: "cow",
+	20: "elephant",
+	21: "bear",
+	22: "zebra",
+	23: "giraffe",
 }
 
 func newOVInfer(modelPath, device string) (*C.OVInfer, error) {
@@ -129,6 +140,7 @@ func rgbMean(rgb []byte) int {
 func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig) {
 	device := C.GoString(C.ov_infer_device(inf))
 	logQ <- fmt.Sprintf("yolo ready device=%s sub_conf=%.2f main_conf=%.2f", device, yc.SubConf, yc.MainConf)
+	occ := newOccupancy()
 
 	for {
 		select {
@@ -161,22 +173,21 @@ func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- 
 				}
 			}
 
-			// Stage 2: primary detect — decode main-ring AUs → multi YOLO.
-			mainRGB, frames, ok := decodeRGBBest(ev.Segments, inferSize, inferSize)
+			// Stage 2: last decoded main-ring frame (not brightest).
+			mainRGB, frames, ok := decodeRGBNearEnd(ev.Segments, inferSize, inferSize)
 			var stillPlain []byte
 			if ok {
 				stillPlain, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
 			}
 
 			// Always save motion clip (even if decode/YOLO fail).
-			var clipRel, videoRel string
+			var clipRel string
 			if store != nil {
 				rec, err := store.SaveMotion(ev, stillPlain)
 				if err != nil {
 					logQ <- fmt.Sprintf("%s: motion save failed: %v", ev.Cam, err)
 				} else {
 					clipRel = rec.ClipRel
-					videoRel = rec.VideoRel
 					logQ <- fmt.Sprintf("%s: motion saved %s", ev.Cam, rec.ID)
 				}
 			}
@@ -191,20 +202,25 @@ func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- 
 				logQ <- fmt.Sprintf("%s: stage2 error: %v", ev.Cam, err)
 				continue
 			}
-			mainPass := len(dets) > 0
+			fresh := occ.consume(ev.Cam, dets, ev.At)
+			mainPass := len(fresh) > 0
 			topName := ""
 			topScore := 0.0
 			if mainPass {
+				topName = fresh[0].Class
+				topScore = fresh[0].Score
+			} else if len(dets) > 0 {
 				topName = dets[0].Class
 				topScore = dets[0].Score
 			}
-			logQ <- fmt.Sprintf("%s: stage2 main frames=%d infer=%.0fms pass=%v dets=%d score=%.2f %s",
-				ev.Cam, frames, mainMS, mainPass, len(dets), topScore, topName)
+			logQ <- fmt.Sprintf("%s: stage2 main frames=%d infer=%.0fms pass=%v dets=%d fresh=%d score=%.2f %s",
+				ev.Cam, frames, mainMS, mainPass, len(dets), len(fresh), topScore, topName)
 
 			if !mainPass {
 				logQ <- fmt.Sprintf("%s: stage done (main reject)", ev.Cam)
 				continue
 			}
+			dets = fresh
 
 			// Annotated multi-box still for alerts.
 			ann, err := AnnotateRGB(mainRGB, inferSize, inferSize, dets, 90)
@@ -213,7 +229,7 @@ func runYOLOWorker(ctx context.Context, detectQ <-chan DetectEvent, logQ chan<- 
 				ann = stillPlain
 			}
 			if store != nil && len(ann) > 0 {
-				arec, err := store.SaveAlert(ev, ann, dets, topName, topScore, clipRel, videoRel)
+				arec, err := store.SaveAlert(ev, ann, dets, topName, topScore, clipRel)
 				if err != nil {
 					logQ <- fmt.Sprintf("%s: alert save failed: %v", ev.Cam, err)
 				} else {

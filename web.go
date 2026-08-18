@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 )
 
 // runWebServer serves live grid, motion/alerts APIs, media, SSE, optional TLS/ACME.
-func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, store *EventStore, logQ chan<- string, tlsDomain, tlsEmail, tlsCert, tlsKey string) {
+func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, store *EventStore, logQ chan<- string, tlsDomain, tlsEmail, tlsCert, tlsKey, cfgPath string) {
 	if addr == "" {
 		return
 	}
@@ -63,7 +64,15 @@ func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, sto
 			return
 		}
 		typ := r.URL.Query().Get("type")
-		limit := 100
+		limit := 80
+		if typ == "alert" {
+			limit = 200
+		}
+		if q := r.URL.Query().Get("limit"); q != "" {
+			if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= 2000 {
+				limit = n
+			}
+		}
 		list := store.List(limit, typ)
 		writeJSON(rw, list)
 	})
@@ -116,6 +125,36 @@ func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, sto
 			return
 		}
 		http.ServeFile(rw, r, abs)
+	})
+
+	mux.HandleFunc("/api/settings", func(rw http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			out := make([]camMotionSettings, 0, len(workers))
+			for _, w := range workers {
+				out = append(out, w.MotionSettings())
+			}
+			writeJSON(rw, map[string]interface{}{"cameras": out})
+		case http.MethodPut, http.MethodPost:
+			var body struct {
+				Cameras []camMotionSettings `json:"cameras"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(rw, err.Error(), 400)
+				return
+			}
+			if err := applyAndSaveSettings(cfgPath, byName, body.Cameras); err != nil {
+				http.Error(rw, err.Error(), 400)
+				return
+			}
+			out := make([]camMotionSettings, 0, len(workers))
+			for _, w := range workers {
+				out = append(out, w.MotionSettings())
+			}
+			writeJSON(rw, map[string]interface{}{"cameras": out})
+		default:
+			http.Error(rw, "method", 405)
+		}
 	})
 
 	mux.HandleFunc("/api/status", func(rw http.ResponseWriter, r *http.Request) {
@@ -178,6 +217,38 @@ func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, sto
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logQ <- fmt.Sprintf("web server: %v", err)
 	}
+}
+
+func applyAndSaveSettings(path string, byName map[string]*CameraWorker, updates []camMotionSettings) error {
+	if path == "" {
+		return fmt.Errorf("no config path")
+	}
+	valid := make([]camMotionSettings, 0, len(updates))
+	for _, u := range updates {
+		if byName[u.Name] == nil {
+			return fmt.Errorf("unknown camera %s", u.Name)
+		}
+		if u.Threshold <= 0 || u.Threshold > 0.5 {
+			return fmt.Errorf("%s: threshold must be >0 and ≤0.5", u.Name)
+		}
+		if u.MotionMinBlob < 1 || u.MotionMinBlob > 200 {
+			return fmt.Errorf("%s: motion_min_blob out of range", u.Name)
+		}
+		if u.MotionMinCompact < 0 || u.MotionMinCompact > 1 {
+			return fmt.Errorf("%s: motion_min_compact out of range", u.Name)
+		}
+		if u.MotionCooldownSec < 0 || u.MotionCooldownSec > 300 {
+			return fmt.Errorf("%s: motion_cooldown_sec out of range", u.Name)
+		}
+		if u.MotionSustainFrames < 1 || u.MotionSustainFrames > 30 {
+			return fmt.Errorf("%s: motion_sustain_frames out of range", u.Name)
+		}
+		valid = append(valid, u)
+	}
+	for _, u := range valid {
+		byName[u.Name].ApplyMotion(u)
+	}
+	return patchCameraSettings(path, valid)
 }
 
 func writeJSON(rw http.ResponseWriter, v interface{}) {
@@ -267,12 +338,10 @@ nav button.active{background:var(--acc2);color:#fff;box-shadow:0 1px 0 rgba(255,
   min-height:240px;text-align:center;font-size:.9rem;padding:24px;
 }
 .split-detail .detail-inner{display:flex;flex-direction:column;gap:14px}
-.split-detail img,
-.split-detail video{
+.split-detail img{
   width:100%;max-height:min(55vh,520px);object-fit:contain;
   border:1px solid var(--bd);border-radius:8px;background:#000;display:block
 }
-.split-detail video{outline:none}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
 .card{
   background:var(--card);border:1px solid var(--bd);border-radius:var(--radius);
@@ -319,6 +388,16 @@ tbody tr.selected{background:rgba(91,159,212,.14)}
 .detlist li{margin:4px 0}
 .empty{color:var(--mut);padding:28px;text-align:center;border:1px dashed var(--bd);border-radius:var(--radius)}
 .mono{font-family:var(--mono);font-size:.8rem}
+.card-recent{margin:0;padding:6px 12px 10px;list-style:none;font-size:.72rem;color:var(--mut);border-top:1px solid var(--bd);min-height:3.2em}
+.card-recent li{display:flex;justify-content:space-between;gap:8px;padding:2px 0;cursor:pointer}
+.card-recent li:hover{color:var(--tx)}
+.card-recent .al{color:#ffb4b4}
+.set-table{width:100%;border:1px solid var(--bd);border-radius:var(--radius);overflow:auto;background:var(--card)}
+.set-table input{width:5.2rem;background:var(--surface);border:1px solid var(--bd);color:var(--tx);padding:5px 7px;border-radius:6px;font:inherit;font-size:.84rem}
+.set-actions{margin-top:14px;display:flex;gap:10px;align-items:center}
+#setMsg{color:var(--mut);font-size:.84rem}
+#setMsg.ok{color:var(--ok)}
+#setMsg.bad{color:var(--al)}
 </style></head><body>
 <header>
   <div class="brand">
@@ -329,6 +408,7 @@ tbody tr.selected{background:rgba(91,159,212,.14)}
     <button type="button" class="active" data-tab="live">Live</button>
     <button type="button" data-tab="alerts">Alerts</button>
     <button type="button" data-tab="motion">Motion</button>
+    <button type="button" data-tab="settings">Settings</button>
   </nav>
   <div class="header-right">
     <span class="status-pill" id="connPill"><span class="dot"></span><span id="conn">Connecting…</span></span>
@@ -354,7 +434,9 @@ tbody tr.selected{background:rgba(91,159,212,.14)}
 		b.WriteString(name)
 		b.WriteString(`.jpg" target="_blank" rel="noopener">Open JPEG</a><span data-age="`)
 		b.WriteString(name)
-		b.WriteString(`">…</span></div></div>`)
+		b.WriteString(`">…</span></div><ul class="card-recent" data-recent="`)
+		b.WriteString(name)
+		b.WriteString(`"></ul></div>`)
 	}
 	b.WriteString(`</div></div>
 <div id="tab-alerts" class="panel">
@@ -365,10 +447,18 @@ tbody tr.selected{background:rgba(91,159,212,.14)}
   </div>
 </div>
 <div id="tab-motion" class="panel">
-  <p class="panel-lead">Every motion or fake trigger with a main-ring snapshot, including YOLO rejects. Click a row to preview.</p>
+  <p class="panel-lead">Last motion triggers (including YOLO rejects). Survives restart. Click a row to preview.</p>
   <div class="split">
     <div class="split-list" id="motion-list"></div>
     <div class="split-detail" id="motion-detail"><div class="placeholder">Select a motion event to view the snapshot.</div></div>
+  </div>
+</div>
+<div id="tab-settings" class="panel">
+  <p class="panel-lead">Per-camera motion sensitivity. Lower threshold / blob = more triggers. Compactness filters noisy foliage. Save writes cameras_all.json and applies immediately.</p>
+  <div class="set-table" id="settings-table"></div>
+  <div class="set-actions">
+    <button type="button" class="btn" id="btnSaveSettings">Save</button>
+    <span id="setMsg"></span>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -417,6 +507,7 @@ const webAppJS = `
       document.getElementById('tab-'+btn.getAttribute('data-tab')).classList.add('active');
       if(btn.getAttribute('data-tab')==='alerts') loadEvents('alert','alerts-list','alert-detail');
       if(btn.getAttribute('data-tab')==='motion') loadEvents('motion','motion-list','motion-detail');
+      if(btn.getAttribute('data-tab')==='settings') loadSettings();
     });
   });
 
@@ -438,7 +529,7 @@ const webAppJS = `
       rows.forEach(function(e){
         var info = e.type==='alert'
           ? (e.dets||[]).map(function(d){return d.class+' '+d.score.toFixed(2);}).join(', ')
-          : (e.video ? 'Video' : (e.still ? 'Still + clip' : 'Clip'));
+          : (e.still ? 'Still + clip' : 'Clip');
         var typeLabel = e.type==='alert' ? 'Alert' : 'Motion';
         h+='<tr data-id="'+esc(e.id)+'">'
           +'<td class="mono">'+esc(fmtWhen(e.at))+'</td><td>'+esc(e.cam)+'</td>'
@@ -468,18 +559,14 @@ const webAppJS = `
       return;
     }
     var h='<div class="detail-inner">';
-    if(e.video){
-      h+='<video id="detail-video" controls playsinline preload="metadata" src="/media/'+esc(e.video)+'"></video>';
-      if(e.still) h+='<img id="detail-still-fallback" src="/media/'+esc(e.still)+'" alt="Still" style="display:none">';
-    } else if(e.still){
+    if(e.still){
       h+='<img src="/media/'+esc(e.still)+'" alt="Preview">';
     } else {
       h+='<div class="placeholder">No preview media for this event.</div>';
     }
     h+='<div class="detlist"><h3>'+esc(e.cam)+'</h3>';
     h+='<p class="mono" style="color:var(--mut);margin:0 0 8px">'+esc(fmtWhen(e.at))+'</p>';
-    if(e.video) h+='<p style="margin:0 0 6px"><a href="/media/'+esc(e.video)+'" download>Download video (.mp4)</a></p>';
-    if(e.clip) h+='<p style="margin:0 0 8px"><a href="/media/'+esc(e.clip)+'" download>Download raw (.h265)</a></p>';
+    if(e.clip) h+='<p style="margin:0 0 8px"><a href="/media/'+esc(e.clip)+'" download>Download clip (.h265)</a></p>';
     if(e.dets && e.dets.length){
       h+='<p style="margin:12px 0 4px;color:var(--mut);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Detections</p><ul>';
       e.dets.forEach(function(x){
@@ -491,13 +578,6 @@ const webAppJS = `
     }
     h+='</div></div>';
     d.innerHTML=h;
-    var vid=document.getElementById('detail-video');
-    var fb=document.getElementById('detail-still-fallback');
-    if(vid){
-      vid.addEventListener('error', function(){
-        if(fb){ vid.style.display='none'; fb.style.display='block'; }
-      });
-    }
   }
 
   var conn=document.getElementById('conn');
@@ -518,6 +598,7 @@ const webAppJS = `
     es.addEventListener('event', function(ev){
       try{
         var e=JSON.parse(ev.data);
+        refreshLiveRecent();
         if(e.type==='alert'){
           banner.textContent='Alert · '+e.cam+' · '+(e.main_class||'object')+' '+(e.main_score||0).toFixed(2);
           banner.classList.add('show');
@@ -531,6 +612,9 @@ const webAppJS = `
           }
           if(document.getElementById('tab-alerts').classList.contains('active'))
             loadEvents('alert','alerts-list','alert-detail');
+        } else if(e.type==='motion'){
+          if(document.getElementById('tab-motion').classList.contains('active'))
+            loadEvents('motion','motion-list','motion-detail');
         }
       }catch(err){}
     });
@@ -543,6 +627,70 @@ const webAppJS = `
     };
   }
   connectSSE();
+  loadEvents('alert','alerts-list','alert-detail');
+  loadEvents('motion','motion-list','motion-detail');
+  refreshLiveRecent();
+
+  function refreshLiveRecent(){
+    fetch('/api/events?limit=80&t='+Date.now()).then(function(r){return r.json();}).then(function(rows){
+      var by={};
+      (rows||[]).forEach(function(e){
+        if(!by[e.cam]) by[e.cam]=[];
+        if(by[e.cam].length<3) by[e.cam].push(e);
+      });
+      document.querySelectorAll('[data-recent]').forEach(function(ul){
+        var cam=ul.getAttribute('data-recent');
+        var list=by[cam]||[];
+        if(!list.length){ ul.innerHTML='<li>No recent events</li>'; return; }
+        ul.innerHTML=list.map(function(e){
+          var label=e.type==='alert' ? (e.main_class||'alert') : 'motion';
+          var cls=e.type==='alert'?'al':'';
+          return '<li class="'+cls+'"><span>'+esc(label)+'</span><span>'+esc(fmtWhen(e.at))+'</span></li>';
+        }).join('');
+      });
+    }).catch(function(){});
+  }
+
+  function loadSettings(){
+    fetch('/api/settings').then(function(r){return r.json();}).then(function(data){
+      var cams=data.cameras||[];
+      var h='<table><thead><tr><th>Camera</th><th>Threshold</th><th>Min blob</th><th>Compact</th><th>Cooldown s</th><th>Sustain</th></tr></thead><tbody>';
+      cams.forEach(function(c){
+        h+='<tr data-cam="'+esc(c.name)+'">'
+          +'<td>'+esc(c.name)+'</td>'
+          +'<td><input data-f="threshold" type="number" step="0.005" min="0.005" max="0.5" value="'+c.threshold+'"></td>'
+          +'<td><input data-f="motion_min_blob" type="number" step="1" min="1" max="200" value="'+c.motion_min_blob+'"></td>'
+          +'<td><input data-f="motion_min_compact" type="number" step="0.05" min="0" max="1" value="'+c.motion_min_compact+'"></td>'
+          +'<td><input data-f="motion_cooldown_sec" type="number" step="1" min="0" max="300" value="'+c.motion_cooldown_sec+'"></td>'
+          +'<td><input data-f="motion_sustain_frames" type="number" step="1" min="1" max="30" value="'+c.motion_sustain_frames+'"></td>'
+          +'</tr>';
+      });
+      h+='</tbody></table>';
+      document.getElementById('settings-table').innerHTML=h;
+    }).catch(function(err){
+      document.getElementById('settings-table').innerHTML='<div class="empty">Load failed: '+esc(err)+'</div>';
+    });
+  }
+
+  document.getElementById('btnSaveSettings').addEventListener('click', function(){
+    var msg=document.getElementById('setMsg');
+    var cams=[];
+    document.querySelectorAll('#settings-table tr[data-cam]').forEach(function(tr){
+      var num=function(f){ return parseFloat(tr.querySelector('[data-f="'+f+'"]').value); };
+      cams.push({
+        name: tr.getAttribute('data-cam'),
+        threshold: num('threshold'),
+        motion_min_blob: parseInt(tr.querySelector('[data-f="motion_min_blob"]').value,10),
+        motion_min_compact: num('motion_min_compact'),
+        motion_cooldown_sec: parseInt(tr.querySelector('[data-f="motion_cooldown_sec"]').value,10),
+        motion_sustain_frames: parseInt(tr.querySelector('[data-f="motion_sustain_frames"]').value,10)
+      });
+    });
+    fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({cameras:cams})})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){ throw new Error(t||r.status); }); return r.json(); })
+      .then(function(){ msg.className='ok'; msg.textContent='Saved'; })
+      .catch(function(err){ msg.className='bad'; msg.textContent=String(err.message||err); });
+  });
 
   document.getElementById('btnNotify').addEventListener('click', function(){
     if(!window.Notification){

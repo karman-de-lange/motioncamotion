@@ -6,6 +6,7 @@ stagetest
 *.a
 
 # runtime / media
+*.log
 clips/
 snapshots/
 *.h265

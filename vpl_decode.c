@@ -40,9 +40,23 @@ static void fill_rgb_gray(uint8_t *rgb, int w, int h) {
     }
 }
 
-/* Letterbox into dst (used for fixed-size YOLO 640×640). */
-static void nv12_to_rgb(const uint8_t *y, const uint8_t *uv, int pitch, int src_w, int src_h,
-                        uint8_t *rgb, int dst_w, int dst_h) {
+static uint8_t clamp_u8(int v) {
+    return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+}
+
+/* Limited-range BT.601. u/v are already (U-128)/(V-128); u=v=0 is gray. */
+static void yuv_to_rgb(int y, int u, int v, uint8_t *out) {
+    int yv = y - 16;
+    int r = (298 * yv + 409 * v + 128) >> 8;
+    int g = (298 * yv - 100 * u - 208 * v + 128) >> 8;
+    int b = (298 * yv + 516 * u + 128) >> 8;
+    out[0] = clamp_u8(r);
+    out[1] = clamp_u8(g);
+    out[2] = clamp_u8(b);
+}
+
+void vpl_nv12_letterbox_rgb(const uint8_t *y, const uint8_t *uv, int pitch, int src_w, int src_h,
+                            uint8_t *rgb, int dst_w, int dst_h) {
     fill_rgb_gray(rgb, dst_w, dst_h);
 
     int scaled_w = dst_w;
@@ -53,23 +67,31 @@ static void nv12_to_rgb(const uint8_t *y, const uint8_t *uv, int pitch, int src_
     }
     int pad_x = (dst_w - scaled_w) / 2;
     int pad_y = (dst_h - scaled_h) / 2;
+    int down_x = src_w > scaled_w;
+    int down_y = src_h > scaled_h;
 
     for (int dy = 0; dy < scaled_h; dy++) {
-        int sy = dy * src_h / scaled_h;
-        const uint8_t *yrow = y + sy * pitch;
-        const uint8_t *uvrow = uv + (sy / 2) * pitch;
+        int sy0 = dy * src_h / scaled_h;
+        int sy1 = (down_y && sy0 + 1 < src_h) ? sy0 + 1 : sy0;
+        const uint8_t *yrow0 = y + (size_t)sy0 * (size_t)pitch;
+        const uint8_t *yrow1 = y + (size_t)sy1 * (size_t)pitch;
+        const uint8_t *uvrow0 = uv ? uv + (size_t)(sy0 / 2) * (size_t)pitch : NULL;
+        const uint8_t *uvrow1 = uv ? uv + (size_t)(sy1 / 2) * (size_t)pitch : NULL;
         uint8_t *out = rgb + ((size_t)(pad_y + dy) * dst_w + pad_x) * 3;
         for (int dx = 0; dx < scaled_w; dx++) {
-            int sx = dx * src_w / scaled_w;
-            int yv = (int)yrow[sx] - 16;
-            int u = (int)uvrow[sx & ~1] - 128;
-            int v = (int)uvrow[(sx & ~1) + 1] - 128;
-            int r = (298 * yv + 409 * v + 128) >> 8;
-            int g = (298 * yv - 100 * u - 208 * v + 128) >> 8;
-            int b = (298 * yv + 516 * u + 128) >> 8;
-            out[dx * 3 + 0] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
-            out[dx * 3 + 1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
-            out[dx * 3 + 2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
+            int sx0 = dx * src_w / scaled_w;
+            int sx1 = (down_x && sx0 + 1 < src_w) ? sx0 + 1 : sx0;
+            int yy = ((int)yrow0[sx0] + (int)yrow0[sx1] + (int)yrow1[sx0] + (int)yrow1[sx1]) >> 2;
+            int u = 0, v = 0;
+            if (uvrow0) {
+                int sx0u = sx0 & ~1;
+                int sx1u = sx1 & ~1;
+                u = ((int)uvrow0[sx0u] + (int)uvrow0[sx1u] + (int)uvrow1[sx0u] + (int)uvrow1[sx1u]) >> 2;
+                v = ((int)uvrow0[sx0u + 1] + (int)uvrow0[sx1u + 1] + (int)uvrow1[sx0u + 1] + (int)uvrow1[sx1u + 1]) >> 2;
+                u -= 128;
+                v -= 128;
+            }
+            yuv_to_rgb(yy, u, v, out + dx * 3);
         }
     }
 }
@@ -98,6 +120,29 @@ static void nv12_to_rgb_fill(const uint8_t *y, const uint8_t *uv, int pitch, int
             out[dx * 3 + 2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
         }
     }
+}
+
+/* HEVC Data.UV is often a valid pointer to zeros → NV12 convert is pure green. */
+int vpl_uv_plane_dead(const uint8_t *uv, int pitch, int src_w, int src_h) {
+    if (!uv || pitch < 2 || src_w < 2 || src_h < 2) {
+        return 1;
+    }
+    int uh = src_h / 2;
+    int uw = src_w & ~1;
+    if (uw > pitch) {
+        uw = pitch & ~1;
+    }
+    unsigned seen = 0;
+    for (int i = 0; i < 8; i++) {
+        int row = (uh * i) / 8;
+        int col = ((uw * i) / 8) & ~1;
+        if (col + 1 >= uw) {
+            col = 0;
+        }
+        seen |= uv[(size_t)row * (size_t)pitch + (size_t)col];
+        seen |= uv[(size_t)row * (size_t)pitch + (size_t)col + 1];
+    }
+    return seen == 0;
 }
 
 /* Plain luma → grayscale RGB for looksee (no chroma, no histogram tricks). */
@@ -503,37 +548,16 @@ int vpl_decoder_rgb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *rgb
         return -96;
     }
     int surf_h = decoded->Info.Height > 0 ? (int)decoded->Info.Height : h;
-    const uint8_t *uv0 = surface_uv(decoded, pitch, surf_h);
-    int crop_x = decoded->Info.CropX;
-    int crop_y = decoded->Info.CropY;
+    const uint8_t *uv_base = surface_uv(decoded, pitch, surf_h);
     const uint8_t *uv = NULL;
-    if (uv0) {
-        uv = uv0 + (size_t)(crop_y / 2) * (size_t)pitch + (size_t)(crop_x & ~1);
-    }
-    if (uv) {
-        nv12_to_rgb(y, uv, pitch, w, h, rgb_out, out_w, out_h);
-    } else {
-        fill_rgb_gray(rgb_out, out_w, out_h);
-        int scaled_w = out_w;
-        int scaled_h = (h * out_w) / w;
-        if (scaled_h > out_h) {
-            scaled_h = out_h;
-            scaled_w = (w * out_h) / h;
-        }
-        int pad_x = (out_w - scaled_w) / 2;
-        int pad_y = (out_h - scaled_h) / 2;
-        for (int dy = 0; dy < scaled_h; dy++) {
-            int sy = dy * h / scaled_h;
-            const uint8_t *yrow = y + sy * pitch;
-            uint8_t *out = rgb_out + ((size_t)(pad_y + dy) * out_w + pad_x) * 3;
-            for (int dx = 0; dx < scaled_w; dx++) {
-                uint8_t yy = yrow[dx * w / scaled_w];
-                out[dx * 3 + 0] = yy;
-                out[dx * 3 + 1] = yy;
-                out[dx * 3 + 2] = yy;
-            }
+    if (uv_base) {
+        uv = uv_base + (size_t)(decoded->Info.CropY / 2) * (size_t)pitch
+                    + (size_t)(decoded->Info.CropX & ~1);
+        if (vpl_uv_plane_dead(uv, pitch, w, h)) {
+            uv = NULL;
         }
     }
+    vpl_nv12_letterbox_rgb(y, uv, pitch, w, h, rgb_out, out_w, out_h);
 
     decoded->FrameInterface->Unmap(decoded);
     decoded->FrameInterface->Release(decoded);
@@ -568,11 +592,6 @@ int vpl_decoder_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
     int sw = decoded->Info.CropW ? decoded->Info.CropW : decoded->Info.Width;
     int sh = decoded->Info.CropH ? decoded->Info.CropH : decoded->Info.Height;
     const uint8_t *y = decoded->Data.Y;
-    const uint8_t *uv = decoded->Data.UV;
-    if (!uv) {
-        int surf_h = decoded->Info.Height > 0 ? (int)decoded->Info.Height : sh;
-        uv = y + (size_t)pitch * (size_t)surf_h;
-    }
 
     int dw = 0, dh = 0;
     fit_size(sw, sh, max_w, max_h, &dw, &dh);
@@ -581,7 +600,7 @@ int vpl_decoder_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
         decoded->FrameInterface->Release(decoded);
         return -2;
     }
-    nv12_to_rgb_fill(y, uv, pitch, sw, sh, rgb_out, dw, dh);
+    y_to_rgb_fill(y, pitch, sw, sh, rgb_out, dw, dh);
     *out_w = dw;
     *out_h = dh;
 

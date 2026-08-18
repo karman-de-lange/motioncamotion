@@ -16,6 +16,10 @@ typedef struct VPLDecoder VPLDecoder;
 int vpl_decoder_new(VPLDecoder **out, int codec);
 int vpl_decoder_thumb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *y_out, int y_cap);
 int vpl_decoder_rgb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *rgb_out, int rgb_cap, int out_w, int out_h);
+/* Letterbox NV12 to dst RGB, pad 114. uv=NULL → limited-range Y as gray. */
+void vpl_nv12_letterbox_rgb(const uint8_t *y, const uint8_t *uv, int pitch,
+                            int src_w, int src_h, uint8_t *rgb, int dst_w, int dst_h);
+int vpl_uv_plane_dead(const uint8_t *uv, int pitch, int src_w, int src_h);
 /* Scale into max_w×max_h preserving aspect (no letterbox). Writes *out_w/*out_h. */
 int vpl_decoder_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
                         uint8_t *rgb_out, int rgb_cap, int max_w, int max_h,

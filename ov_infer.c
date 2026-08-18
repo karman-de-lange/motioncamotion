@@ -27,7 +27,54 @@ static void rgb_to_nchw_f32(const uint8_t *rgb, int w, int h, float *dst) {
 }
 
 static int class_wanted(int cls) {
-	return cls == 0 || cls == 2 || cls == 15;
+	/* person, car, bus, truck + COCO animals 14–23 (bird through giraffe). */
+	return cls == 0 || cls == 2 || cls == 5 || cls == 7 ||
+	       (cls >= 14 && cls <= 23);
+}
+
+static float box_iou(float ax1, float ay1, float ax2, float ay2,
+                     float bx1, float by1, float bx2, float by2) {
+	float ix1 = ax1 > bx1 ? ax1 : bx1;
+	float iy1 = ay1 > by1 ? ay1 : by1;
+	float ix2 = ax2 < bx2 ? ax2 : bx2;
+	float iy2 = ay2 < by2 ? ay2 : by2;
+	float iw = ix2 - ix1;
+	float ih = iy2 - iy1;
+	if (iw <= 0 || ih <= 0) {
+		return 0;
+	}
+	float inter = iw * ih;
+	float aa = (ax2 - ax1) * (ay2 - ay1);
+	float ba = (bx2 - bx1) * (by2 - by1);
+	float u = aa + ba - inter;
+	if (u <= 0) {
+		return 0;
+	}
+	return inter / u;
+}
+
+static int nms_same_class(OVDet *dets, int n, float iou_thr) {
+	int keep = 0;
+	char drop[OV_MAX_DETS * 4];
+	for (int i = 0; i < n; i++) {
+		drop[i] = 0;
+	}
+	for (int i = 0; i < n; i++) {
+		if (drop[i]) {
+			continue;
+		}
+		dets[keep++] = dets[i];
+		for (int j = i + 1; j < n; j++) {
+			if (drop[j] || dets[j].class_id != dets[i].class_id) {
+				continue;
+			}
+			if (box_iou(dets[i].x1, dets[i].y1, dets[i].x2, dets[i].y2,
+			            dets[j].x1, dets[j].y1, dets[j].x2, dets[j].y2) >= iou_thr) {
+				drop[j] = 1;
+			}
+		}
+	}
+	return keep;
 }
 
 static void load_plugins(ov_core_t *core) {
@@ -431,6 +478,7 @@ int ov_infer_run_multi(OVInfer *inf, const uint8_t *rgb, float conf,
 		tmp[j + 1] = key;
 	}
 
+	ntmp = nms_same_class(tmp, ntmp, 0.45f);
 	int n = ntmp < max_dets ? ntmp : max_dets;
 	for (int i = 0; i < n; i++) {
 		out_dets[i] = tmp[i];

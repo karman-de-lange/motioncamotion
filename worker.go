@@ -127,6 +127,49 @@ func (w *CameraWorker) Name() string {
 	return w.cfg.Name
 }
 
+type camMotionSettings struct {
+	Name                string  `json:"name"`
+	Threshold           float64 `json:"threshold"`
+	MotionMinBlob       int     `json:"motion_min_blob"`
+	MotionMinCompact    float64 `json:"motion_min_compact"`
+	MotionCooldownSec   int     `json:"motion_cooldown_sec"`
+	MotionSustainFrames int     `json:"motion_sustain_frames"`
+}
+
+func (w *CameraWorker) MotionSettings() camMotionSettings {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cd := int(w.cooldown / time.Second)
+	return camMotionSettings{
+		Name:                w.cfg.Name,
+		Threshold:           w.sadCutoff / 100,
+		MotionMinBlob:       w.minBlob,
+		MotionMinCompact:    w.minCompact,
+		MotionCooldownSec:   cd,
+		MotionSustainFrames: w.sustainFrames,
+	}
+}
+
+func (w *CameraWorker) ApplyMotion(s camMotionSettings) {
+	if s.Threshold > 0 {
+		w.sadCutoff = s.Threshold * 100
+	}
+	if s.MotionMinBlob > 0 {
+		w.minBlob = s.MotionMinBlob
+	}
+	if s.MotionMinCompact >= 0 {
+		w.minCompact = s.MotionMinCompact
+	}
+	if s.MotionCooldownSec >= 0 {
+		w.mu.Lock()
+		w.cooldown = time.Duration(s.MotionCooldownSec) * time.Second
+		w.mu.Unlock()
+	}
+	if s.MotionSustainFrames > 0 {
+		w.sustainFrames = s.MotionSustainFrames
+	}
+}
+
 func (w *CameraWorker) setSubCodec(codec int) {
 	w.mu.Lock()
 	w.subCodec = codec

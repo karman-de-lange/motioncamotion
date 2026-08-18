@@ -43,6 +43,19 @@ func (s *closeWaitStub) wait(ctx context.Context) {
 	<-s.closed
 }
 
+func TestApplyMotion_updatesGates(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c"}, 3, 1024, 2, 6, 3, 6, 3*time.Second, nil, nil)
+	w.ApplyMotion(camMotionSettings{
+		Name: "c", Threshold: 0.08, MotionMinBlob: 20,
+		MotionMinCompact: 0.4, MotionCooldownSec: 12, MotionSustainFrames: 4,
+	})
+	got := w.MotionSettings()
+	if got.Threshold < 0.079 || got.Threshold > 0.081 || got.MotionMinBlob != 20 ||
+		got.MotionMinCompact != 0.4 || got.MotionCooldownSec != 12 || got.MotionSustainFrames != 4 {
+		t.Fatalf("settings %+v", got)
+	}
+}
+
 func TestClearLooksee_previewUnavailable(t *testing.T) {
 	w := &CameraWorker{
 		status:        "connected",

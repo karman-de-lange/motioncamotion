@@ -178,6 +178,55 @@ func loadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
+func patchCameraSettings(path string, updates []camMotionSettings) error {
+	if path == "" {
+		return fmt.Errorf("empty config path")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	var cams []map[string]interface{}
+	if err := json.Unmarshal(root["cameras"], &cams); err != nil {
+		return err
+	}
+	by := make(map[string]camMotionSettings, len(updates))
+	for _, u := range updates {
+		by[u.Name] = u
+	}
+	for _, c := range cams {
+		name, _ := c["name"].(string)
+		u, ok := by[name]
+		if !ok {
+			continue
+		}
+		c["threshold"] = u.Threshold
+		c["motion_min_blob"] = u.MotionMinBlob
+		c["motion_min_compact"] = u.MotionMinCompact
+		c["motion_cooldown_sec"] = u.MotionCooldownSec
+		c["motion_sustain_frames"] = u.MotionSustainFrames
+	}
+	raw, err := json.Marshal(cams)
+	if err != nil {
+		return err
+	}
+	root["cameras"] = raw
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func main() {
 	cfgPath := "cameras.json"
 	if len(os.Args) > 1 {
@@ -255,7 +304,7 @@ func main() {
 	}
 
 	if cfg.PreviewAddr != "" && cfg.PreviewAddr != "off" {
-		go runWebServer(ctx, cfg.PreviewAddr, workers, store, logQ, cfg.TLSDomain, cfg.TLSEmail, cfg.TLSCert, cfg.TLSKey)
+		go runWebServer(ctx, cfg.PreviewAddr, workers, store, logQ, cfg.TLSDomain, cfg.TLSEmail, cfg.TLSCert, cfg.TLSKey, cfgPath)
 	}
 
 	if cfg.FakeMotionMinSec > 0 && cfg.FakeMotionMaxSec >= cfg.FakeMotionMinSec {

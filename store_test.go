@@ -52,7 +52,7 @@ func TestEventStore_SaveMotionAndPrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Type != "motion" || rec.ClipRel == "" {
+	if rec.Type != "motion" || rec.ClipRel == "" || rec.VideoRel != "" {
 		t.Fatalf("bad rec: %+v", rec)
 	}
 	abs, err := s.AbsMedia(rec.ClipRel)
@@ -97,6 +97,66 @@ func fakeHEVCKeyframe() []byte {
 	return []byte{0, 0, 0, 1, 38, 0, 1, 2, 3, 4, 5, 6, 7, 8}
 }
 
+func TestEventStore_loadRecentSurvivesReopen(t *testing.T) {
+	root := t.TempDir()
+	s, err := newEventStore(root, 7, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := DetectEvent{Cam: "c1", At: time.Now(), Label: "motion", SAD: 4, Segments: [][]byte{fakeHEVCKeyframe()}}
+	if _, err := s.SaveMotion(ev, []byte{0xff, 0xd8, 0xff, 0xd9}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveAlert(ev, []byte{0xff, 0xd8, 0xff, 0xd9}, []DetBox{{Class: "person", Score: 0.9, ClassID: 0}}, "person", 0.9, "motion/x.h265"); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := newEventStore(root, 7, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(s2.List(10, "alert")); n != 1 {
+		t.Fatalf("alerts after reopen: %d", n)
+	}
+	if n := len(s2.List(10, "motion")); n != 1 {
+		t.Fatalf("motion after reopen: %d", n)
+	}
+}
+
+func TestEventStore_pruneSizePrefersMotion(t *testing.T) {
+	root := t.TempDir()
+	s, err := newEventStore(root, 7, 1) // 1 MiB cap
+	if err != nil {
+		t.Fatal(err)
+	}
+	motDir := filepath.Join(root, "motion", "20260101")
+	alDir := filepath.Join(root, "alerts", "20260101")
+	_ = os.MkdirAll(motDir, 0o755)
+	_ = os.MkdirAll(alDir, 0o755)
+	mot := filepath.Join(motDir, "old.h265")
+	al := filepath.Join(alDir, "keep.jpg")
+	if err := os.WriteFile(mot, make([]byte, 700*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(al, make([]byte, 700*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(mot, old, old)
+	n, err := s.Prune()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatalf("expected a removal, got %d", n)
+	}
+	if _, err := os.Stat(mot); !os.IsNotExist(err) {
+		t.Fatal("motion file should be pruned first")
+	}
+	if _, err := os.Stat(al); err != nil {
+		t.Fatal("alert still should survive size prune")
+	}
+}
+
 func TestEventStore_SaveAlertMultiBox(t *testing.T) {
 	root := t.TempDir()
 	s, err := newEventStore(root, 7, 100)
@@ -114,7 +174,7 @@ func TestEventStore_SaveAlertMultiBox(t *testing.T) {
 		t.Fatal(err)
 	}
 	ev := DetectEvent{Cam: "c1", At: time.Now(), Label: "motion", SAD: 12}
-	rec, err := s.SaveAlert(ev, jpg, dets, "person", 0.9, "motion/x.h265", "motion/x.mp4")
+	rec, err := s.SaveAlert(ev, jpg, dets, "person", 0.9, "motion/x.h265")
 	if err != nil {
 		t.Fatal(err)
 	}

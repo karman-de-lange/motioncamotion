@@ -66,3 +66,27 @@ func (v *vplDecoder) Close() {
 	C.vpl_decoder_free(v.dec)
 	v.dec = nil
 }
+
+func uvPlaneDead(uv []byte, pitch, srcW, srcH int) bool {
+	var uvp *C.uint8_t
+	if len(uv) > 0 {
+		uvp = (*C.uint8_t)(unsafe.Pointer(&uv[0]))
+	}
+	return C.vpl_uv_plane_dead(uvp, C.int(pitch), C.int(srcW), C.int(srcH)) != 0
+}
+
+func nv12LetterboxRGB(y, uv []byte, pitch, srcW, srcH, dstW, dstH int) []byte {
+	rgb := make([]byte, dstW*dstH*3)
+	var uvp *C.uint8_t
+	if len(uv) > 0 {
+		uvp = (*C.uint8_t)(unsafe.Pointer(&uv[0]))
+	}
+	C.vpl_nv12_letterbox_rgb(
+		(*C.uint8_t)(unsafe.Pointer(&y[0])),
+		uvp,
+		C.int(pitch), C.int(srcW), C.int(srcH),
+		(*C.uint8_t)(unsafe.Pointer(&rgb[0])),
+		C.int(dstW), C.int(dstH),
+	)
+	return rgb
+}

@@ -10,7 +10,7 @@ int ov_infer_new(OVInfer **out, const char *model_path, const char *device, int 
 
 void ov_infer_free(OVInfer *inf);
 
-/* classes: person=0 car=2 cat=15. bbox in model input pixels. out_ms is infer only. */
+/* Wanted classes: person/car/bus/truck + COCO animals 14–23. bbox in model pixels. */
 int ov_infer_run(OVInfer *inf, const uint8_t *rgb, float conf,
                  float *out_ms, int *out_pass, float *out_score, int *out_class,
                  float *out_x1, float *out_y1, float *out_x2, float *out_y2);

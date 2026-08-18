@@ -42,20 +42,23 @@ func NewFrameDecoder(codec int) (d FrameDecoder, rc int) {
 	return newFrameDecoder(codec)
 }
 
-// decodeRGBBest picks the brightest successfully decoded frame (avoids black/partial).
-// Used for primary (main-ring) stage-2 detect — same AU list for every backend.
-func decodeRGBBest(segments [][]byte, outW, outH int) ([]byte, int, bool) {
-	// Main ring is H.265 in current deployments (Hik + Imou main).
+// decodeRGBNearEnd feeds AUs in order and returns the last successfully decoded RGB.
+func decodeRGBNearEnd(segments [][]byte, outW, outH int) ([]byte, int, bool) {
 	dec, rc := NewFrameDecoder(CodecHEVC)
 	if rc != 0 || dec == nil {
 		return nil, 0, false
 	}
 	defer dec.Close()
+	return decodeRGBNearEndWith(dec, segments, outW, outH)
+}
 
+func decodeRGBNearEndWith(dec FrameDecoder, segments [][]byte, outW, outH int) ([]byte, int, bool) {
 	rgb := make([]byte, outW*outH*3)
+	last := make([]byte, outW*outH*3)
 	best := make([]byte, outW*outH*3)
 	frames := 0
 	bestMean := -1
+	lastMean := -1
 	for _, seg := range segments {
 		if len(seg) == 0 {
 			continue
@@ -64,17 +67,54 @@ func decodeRGBBest(segments [][]byte, outW, outH int) ([]byte, int, bool) {
 			continue
 		}
 		frames++
-		mean := rgbMean(rgb)
-		if mean > bestMean {
-			bestMean = mean
+		m := rgbCenterMean(rgb)
+		if !rgbUsableMean(rgb, m) {
+			continue
+		}
+		copy(last, rgb)
+		lastMean = m
+		if m > bestMean {
+			bestMean = m
 			copy(best, rgb)
 		}
 	}
-	if frames > 0 && bestMean > 0 {
+	if frames == 0 || bestMean < 0 {
+		return nil, 0, false
+	}
+	// Half-decoded P-frames are darker/sliced; keep last only if it is nearly as full as the best.
+	if lastMean < bestMean*7/10 {
 		return best, frames, true
 	}
-	return nil, 0, false
+	return last, frames, true
 }
+
+func rgbCenterMean(rgb []byte) int {
+	const w, h = inferSize, inferSize
+	if len(rgb) < w*h*3 {
+		return 0
+	}
+	var s, n int
+	for y := h / 4; y < 3*h/4; y += 2 {
+		off := y * w * 3
+		for x := 0; x < w; x += 8 {
+			i := off + x*3
+			s += int(rgb[i]) + int(rgb[i+1]) + int(rgb[i+2])
+			n += 3
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return s / n
+}
+
+func rgbUsableMean(rgb []byte, mean int) bool {
+	return mean >= 16 && len(rgb) >= 3
+}
+
+func rgbUsable(rgb []byte) bool { return rgbUsableMean(rgb, rgbCenterMean(rgb)) }
+
+func rgbChromaOK(rgb []byte) bool { return rgbUsable(rgb) }
 
 // decodeAUsToRGBFit feeds AUs into a fresh decoder → RGB fit (looksee).
 func decodeAUsToRGBFit(aus [][]byte, maxW, maxH, codec int) (rgb []byte, outW, outH int, err error) {

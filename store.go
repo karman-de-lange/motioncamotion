@@ -2,11 +2,9 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,19 +14,19 @@ import (
 
 // EventRecord is one persisted motion or YOLO-pass alert (JSONL index line).
 type EventRecord struct {
-	ID        string   `json:"id"`
-	Type      string   `json:"type"` // "motion" | "alert"
-	Cam       string   `json:"cam"`
+	ID        string    `json:"id"`
+	Type      string    `json:"type"` // "motion" | "alert"
+	Cam       string    `json:"cam"`
 	At        time.Time `json:"at"`
-	Label     string   `json:"label"` // motion|fake
-	SAD       float64  `json:"sad"`
-	Pass      bool     `json:"pass"`
-	ClipRel   string   `json:"clip,omitempty"`   // relative annex-B .h265
-	VideoRel  string   `json:"video,omitempty"`  // relative browser-playable .mp4
-	StillRel  string   `json:"still,omitempty"`  // relative jpeg
-	Dets      []DetBox `json:"dets,omitempty"`
-	MainScore float64  `json:"main_score,omitempty"`
-	MainClass string   `json:"main_class,omitempty"`
+	Label     string    `json:"label"` // motion|fake
+	SAD       float64   `json:"sad"`
+	Pass      bool      `json:"pass"`
+	ClipRel   string    `json:"clip,omitempty"`  // relative annex-B .h265
+	VideoRel  string    `json:"video,omitempty"` // legacy; no longer written (old ffmpeg mp4)
+	StillRel  string    `json:"still,omitempty"` // relative jpeg
+	Dets      []DetBox  `json:"dets,omitempty"`
+	MainScore float64   `json:"main_score,omitempty"`
+	MainClass string    `json:"main_class,omitempty"`
 }
 
 // EventStore writes media + append-only index; serves lists for the web UI.
@@ -39,9 +37,9 @@ type EventStore struct {
 	maxAge   time.Duration // 0 = no age prune
 	maxBytes int64         // 0 = no size prune
 	// live recent for SSE / UI (newest last)
-	recent   []EventRecord
-	recentN  int
-	subs     map[chan EventRecord]struct{}
+	recent  []EventRecord
+	recentN int
+	subs    map[chan EventRecord]struct{}
 }
 
 func newEventStore(root string, maxAgeDays int, maxMB int) (*EventStore, error) {
@@ -59,7 +57,7 @@ func newEventStore(root string, maxAgeDays int, maxMB int) (*EventStore, error) 
 		index:    filepath.Join(root, "events.jsonl"),
 		maxAge:   time.Duration(maxAgeDays) * 24 * time.Hour,
 		maxBytes: int64(maxMB) << 20,
-		recentN:  200,
+		recentN:  2000,
 		subs:     make(map[chan EventRecord]struct{}),
 	}
 	if maxAgeDays <= 0 {
@@ -205,12 +203,6 @@ func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, 
 			rec.StillRel = filepath.ToSlash(filepath.Join("motion", day, stillName))
 		}
 	}
-	// Browser-playable H.264 MP4 (Chrome/Firefox need AVC; raw .h265 will not play).
-	mp4Name := id + ".mp4"
-	mp4Path := filepath.Join(dir, mp4Name)
-	if err := remuxClipToMP4(clipPath, mp4Path); err == nil {
-		rec.VideoRel = filepath.ToSlash(filepath.Join("motion", day, mp4Name))
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,35 +212,9 @@ func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, 
 	return rec, nil
 }
 
-// remuxClipToMP4 builds a progressive H.264 MP4 for in-browser playback.
-// Always re-encodes to AVC: HEVC-in-MP4 copy is not playable in most Chrome/Firefox builds,
-// and default framerate on elementary streams often halves perceived duration (e.g. 5s→2.5s).
-func remuxClipToMP4(h265Path, mp4Path string) error {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	_ = os.Remove(mp4Path)
-	// Hik main is typically 15fps; -r on input sets timestamps for annex-B without VFR mess.
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error",
-		"-y", "-fflags", "+genpts", "-r", "15", "-f", "hevc", "-i", h265Path,
-		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
-		"-an", "-movflags", "+faststart", mp4Path)
-	if err := cmd.Run(); err != nil {
-		_ = os.Remove(mp4Path)
-		return err
-	}
-	if st, err := os.Stat(mp4Path); err != nil || st.Size() == 0 {
-		_ = os.Remove(mp4Path)
-		return fmt.Errorf("empty mp4")
-	}
-	return nil
-}
-
 // SaveAlert writes annotated still + metadata for a YOLO pass.
-// clipRel / videoRel are optional paths from the matching motion save.
-func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, topClass string, topScore float64, clipRel, videoRel string) (EventRecord, error) {
+// clipRel is the matching motion .h265.
+func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, topClass string, topScore float64, clipRel string) (EventRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -275,7 +241,6 @@ func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, 
 		Pass:      true,
 		StillRel:  filepath.ToSlash(filepath.Join("alerts", day, stillName)),
 		ClipRel:   clipRel,
-		VideoRel:  videoRel,
 		Dets:      dets,
 		MainScore: topScore,
 		MainClass: topClass,
@@ -359,8 +324,23 @@ func (s *EventStore) pruneLocked(now time.Time) (int, error) {
 		})
 	}
 	if s.maxBytes > 0 && total > s.maxBytes {
-		sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+		var motion, alerts []fileInfo
+		root := filepath.Clean(s.root)
 		for _, f := range files {
+			rel, err := filepath.Rel(root, f.path)
+			if err != nil {
+				motion = append(motion, f)
+				continue
+			}
+			if strings.HasPrefix(filepath.ToSlash(rel), "alerts/") {
+				alerts = append(alerts, f)
+			} else {
+				motion = append(motion, f)
+			}
+		}
+		// Drop oldest motion first so restart prune cannot wipe the alert list.
+		sort.Slice(motion, func(i, j int) bool { return motion[i].mod.Before(motion[j].mod) })
+		for _, f := range motion {
 			if total <= s.maxBytes {
 				break
 			}
@@ -368,6 +348,19 @@ func (s *EventStore) pruneLocked(now time.Time) (int, error) {
 				total -= f.size
 				removed++
 				delete(keep, f.path)
+			}
+		}
+		if total > s.maxBytes {
+			sort.Slice(alerts, func(i, j int) bool { return alerts[i].mod.Before(alerts[j].mod) })
+			for _, f := range alerts {
+				if total <= s.maxBytes {
+					break
+				}
+				if err := os.Remove(f.path); err == nil {
+					total -= f.size
+					removed++
+					delete(keep, f.path)
+				}
 			}
 		}
 	}
