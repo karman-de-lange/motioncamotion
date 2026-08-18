@@ -130,7 +130,7 @@ func loadConfig(path string) (Config, error) {
 	}
 	// 0 / omitted → 3s; negative → off.
 	if cfg.MotionCooldownSec == 0 {
-		cfg.MotionCooldownSec = 3
+		cfg.MotionCooldownSec = 1
 	} else if cfg.MotionCooldownSec < 0 {
 		cfg.MotionCooldownSec = 0
 	}

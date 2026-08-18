@@ -64,7 +64,7 @@ func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, sto
 			return
 		}
 		typ := r.URL.Query().Get("type")
-		limit := 80
+		limit := 200
 		if typ == "alert" {
 			limit = 200
 		}
@@ -632,12 +632,18 @@ const webAppJS = `
   refreshLiveRecent();
 
   function refreshLiveRecent(){
-    fetch('/api/events?limit=80&t='+Date.now()).then(function(r){return r.json();}).then(function(rows){
+    Promise.all([
+      fetch('/api/events?type=alert&limit=50&t='+Date.now()).then(function(r){return r.json();}),
+      fetch('/api/events?type=motion&limit=80&t='+Date.now()).then(function(r){return r.json();})
+    ]).then(function(arr){
       var by={};
-      (rows||[]).forEach(function(e){
+      function add(e){
+        if(!e) return;
         if(!by[e.cam]) by[e.cam]=[];
         if(by[e.cam].length<3) by[e.cam].push(e);
-      });
+      }
+      (arr[0]||[]).forEach(add);
+      (arr[1]||[]).forEach(add);
       document.querySelectorAll('[data-recent]').forEach(function(ul){
         var cam=ul.getAttribute('data-recent');
         var list=by[cam]||[];

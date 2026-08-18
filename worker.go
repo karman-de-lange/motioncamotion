@@ -47,6 +47,7 @@ type CameraWorker struct {
 	previewJPEG      []byte
 	previewJPEGAt    time.Time
 	afterLookseeCopy func() // test hook: runs after snapshot, before decode
+	detectBusy       bool   // one YOLO sample in flight for this cam
 
 	detectQ chan<- DetectEvent
 	logQ    chan<- string
@@ -484,9 +485,24 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 	}
 }
 
+func (w *CameraWorker) clearDetectBusy() {
+	w.mu.Lock()
+	w.detectBusy = false
+	w.mu.Unlock()
+}
+
 func (w *CameraWorker) enqueueDetect(label string, sad float64, subRGB []byte) {
+	w.mu.Lock()
+	if w.detectBusy {
+		w.mu.Unlock()
+		return
+	}
+	w.detectBusy = true
+	w.mu.Unlock()
+
 	segments := w.ring.snapshot(snapshotDur)
 	if len(segments) == 0 {
+		w.clearDetectBusy()
 		return
 	}
 
@@ -497,6 +513,7 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, subRGB []byte) {
 		SubRGB:   subRGB,
 		SAD:      sad,
 		Label:    label,
+		done:     w.clearDetectBusy,
 	}
 
 	go func(ev DetectEvent) {

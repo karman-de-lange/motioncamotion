@@ -30,11 +30,19 @@ func TestOccupancy_parkedCarNeedsNegativeObserve(t *testing.T) {
 	if n := o.consume("hik2", car, now.Add(20*time.Minute)); len(n) != 0 {
 		t.Fatalf("parked truck re-alerted after quiet: %d", len(n))
 	}
-	// Absent for 3 infers → gone; then it is fresh again.
-	for i := 0; i < occGoneSamples; i++ {
+	// Foliage / empty infers must not evict a parked vehicle.
+	for i := 0; i < occGoneSamples+2; i++ {
 		o.consume("hik2", nil, now.Add(time.Duration(21+i)*time.Minute))
 	}
-	if n := o.consume("hik2", car, now.Add(30*time.Minute)); len(n) != 1 {
+	if n := o.consume("hik2", car, now.Add(30*time.Minute)); len(n) != 0 {
+		t.Fatalf("empty infers evicted parked truck: %d", len(n))
+	}
+	// Another vehicle elsewhere for N looks → this track is gone.
+	other := []DetBox{{Class: "car", ClassID: 2, Score: 0.7, X1: 10, Y1: 10, X2: 40, Y2: 40}}
+	for i := 0; i < occGoneSamples; i++ {
+		o.consume("hik2", other, now.Add(time.Duration(31+i)*time.Minute))
+	}
+	if n := o.consume("hik2", car, now.Add(40*time.Minute)); len(n) != 1 {
 		t.Fatalf("truck after leave should be fresh, got %d", len(n))
 	}
 }

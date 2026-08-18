@@ -120,6 +120,13 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 	tracks := o.cams[cam]
 	matched := make([]bool, len(tracks))
 	var fresh []DetBox
+	sawVehicle := false
+	for _, d := range dets {
+		if isVehicleClass(d.ClassID) {
+			sawVehicle = true
+			break
+		}
+	}
 
 	for _, d := range dets {
 		dt := detToTrack(d, now)
@@ -154,6 +161,12 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 			continue
 		}
 		if tr.vehicle {
+			// Empty/foliage infers are not "truck left" — only evict when
+			// another vehicle was seen and this track did not match.
+			if !sawVehicle {
+				kept = append(kept, tr)
+				continue
+			}
 			tr.gone++
 			if tr.gone < occGoneSamples {
 				kept = append(kept, tr)
