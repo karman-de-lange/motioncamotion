@@ -28,22 +28,25 @@ type CameraWorker struct {
 	sadCutoff     float64
 	sustainFrames int
 	minBlob       int
-	avgFrames     int // temporal mean window (noise kill)
-	lagFrames     int // older window offset (slow human motion)
+	minCompact    float64 // 0 = no compactness gate
+	avgFrames     int     // temporal mean window (noise kill)
+	lagFrames     int     // older window offset (slow human motion)
 	cooldown      time.Duration
 	ignore        []bool
 	status        string
 
-	mu            sync.Mutex
-	ring          *ringBuffer
-	lastMotionAt  time.Time
-	subCodec      int // CodecHEVC or CodecAVC
-	subSPS        []byte // H.264 SDP params for preview / IDR
-	subPPS        []byte
-	latestSubs    [][]byte // recent sub annex-B AUs for on-demand web JPEG
-	lastSubAUAt   time.Time
-	previewJPEG   []byte
-	previewJPEGAt time.Time
+	mu               sync.Mutex
+	ring             *ringBuffer
+	lastMotionAt     time.Time
+	subCodec         int    // CodecHEVC or CodecAVC
+	subSPS           []byte // H.264 SDP params for preview / IDR
+	subPPS           []byte
+	latestSubs       [][]byte // recent sub annex-B AUs for on-demand web JPEG
+	lastSubAUAt      time.Time
+	lookseeGen       uint64
+	previewJPEG      []byte
+	previewJPEGAt    time.Time
+	afterLookseeCopy func() // test hook: runs after snapshot, before decode
 
 	detectQ chan<- DetectEvent
 	logQ    chan<- string
@@ -65,11 +68,26 @@ func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBl
 	if lagFrames < avgFrames {
 		lagFrames = avgFrames
 	}
+	if cam.Threshold > 0 {
+		sadCutoff = cam.Threshold * 100
+	}
+	if cam.MotionSustainFrames > 0 {
+		sustainFrames = cam.MotionSustainFrames
+	}
+	if cam.MotionMinBlob > 0 {
+		minBlob = cam.MotionMinBlob
+	}
+	if cam.MotionCooldownSec > 0 {
+		cooldown = time.Duration(cam.MotionCooldownSec) * time.Second
+	} else if cam.MotionCooldownSec < 0 {
+		cooldown = 0
+	}
 	return &CameraWorker{
 		cfg:           cam,
 		sadCutoff:     sadCutoff,
 		sustainFrames: sustainFrames,
 		minBlob:       minBlob,
+		minCompact:    cam.MotionMinCompact,
 		avgFrames:     avgFrames,
 		lagFrames:     lagFrames,
 		cooldown:      cooldown,
@@ -160,6 +178,17 @@ func (w *CameraWorker) setLatestSubAU(au []byte) {
 	w.mu.Unlock()
 }
 
+// lastSubAUAt must be zeroed so the next watchdog grace is not computed from the previous session.
+func (w *CameraWorker) clearLooksee() {
+	w.mu.Lock()
+	w.latestSubs = nil
+	w.lastSubAUAt = time.Time{}
+	w.lookseeGen++
+	w.previewJPEG = nil
+	w.previewJPEGAt = time.Time{}
+	w.mu.Unlock()
+}
+
 // subAUStale reports whether no sub AU has arrived within maxAge (or never).
 func (w *CameraWorker) subAUStale(maxAge time.Duration) bool {
 	w.mu.Lock()
@@ -171,7 +200,24 @@ func (w *CameraWorker) subAUStale(maxAge time.Duration) bool {
 }
 
 func (w *CameraWorker) copyLatestSubs() [][]byte {
-	return w.copyLatestSubsN(0)
+	aus, _ := w.snapshotLooksee()
+	return aus
+}
+
+func (w *CameraWorker) snapshotLooksee() ([][]byte, uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	gen := w.lookseeGen
+	if len(w.latestSubs) == 0 {
+		return nil, gen
+	}
+	out := make([][]byte, len(w.latestSubs))
+	for i, au := range w.latestSubs {
+		cp := make([]byte, len(au))
+		copy(cp, au)
+		out[i] = cp
+	}
+	return out, gen
 }
 
 // copyLatestSubsN returns the last n sub AUs (n<=0 means all).
@@ -211,14 +257,29 @@ func (w *CameraWorker) cachedPreviewJPEGFresh(ttl time.Duration) []byte {
 	return out
 }
 
-func (w *CameraWorker) storePreviewJPEG(jpg []byte) {
+func (w *CameraWorker) storePreviewJPEGAtGen(jpg []byte, gen uint64) bool {
 	// Always install a fresh slice so HTTP readers never see a half-written buffer.
 	cp := make([]byte, len(jpg))
 	copy(cp, jpg)
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.lookseeGen != gen {
+		return false
+	}
 	w.previewJPEG = cp
 	w.previewJPEGAt = time.Now()
-	w.mu.Unlock()
+	return true
+}
+
+func (w *CameraWorker) cachedPreviewJPEGAtGen(gen uint64) []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.lookseeGen != gen || len(w.previewJPEG) == 0 || time.Since(w.previewJPEGAt) > 60*time.Second {
+		return nil
+	}
+	out := make([]byte, len(w.previewJPEG))
+	copy(out, w.previewJPEG)
+	return out
 }
 
 func annexB(parts ...[]byte) []byte {
@@ -261,21 +322,31 @@ func (w *CameraWorker) Run(ctx context.Context) {
 }
 
 func (w *CameraWorker) stream(ctx context.Context) {
+	w.streamWith(ctx, w.runMain, w.runSub)
+}
+
+func (w *CameraWorker) streamWith(ctx context.Context, main, sub func(context.Context)) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	if w.ring != nil {
+		w.ring.clear()
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		w.runMain(streamCtx)
+		defer cancel()
+		defer w.setStatus("reconnecting")
+		main(streamCtx)
 	}()
 	go func() {
 		defer wg.Done()
-		w.runSub(streamCtx)
+		defer cancel()
+		defer w.setStatus("reconnecting")
+		sub(streamCtx)
 	}()
-
-	w.setStatus("connected")
 	wg.Wait()
 }
 
@@ -292,6 +363,10 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 		return
 	}
 	defer c.Close()
+	go func() {
+		<-ctx.Done()
+		c.Close()
+	}()
 
 	desc, _, err := c.Describe(u)
 	if err != nil {
@@ -349,19 +424,15 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 		fmt.Fprintf(os.Stderr, "%s main: %v\n", w.cfg.Name, err)
 		return
 	}
-
-	go func() {
-		<-ctx.Done()
-		c.Close()
-	}()
+	if ctx.Err() == nil {
+		w.setStatus("connected")
+	}
 
 	done := make(chan error, 1)
 	go func() { done <- c.Wait() }()
 
 	for {
 		select {
-		case <-ctx.Done():
-			return
 		case <-trim.C:
 			w.ring.trim(ringKeepDur)
 		case <-done:

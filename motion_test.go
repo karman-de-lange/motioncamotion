@@ -54,6 +54,18 @@ func TestSadMotion_ignoreMask(t *testing.T) {
 	}
 }
 
+func TestCompactness_diffuseVsBlob(t *testing.T) {
+	if compactness(8, 8) != 1 {
+		t.Fatalf("solid blob compact=%v", compactness(8, 8))
+	}
+	if compactness(8, 80) >= 0.35 {
+		t.Fatalf("diffuse should be below 0.35, got %v", compactness(8, 80))
+	}
+	if compactness(0, 0) != 0 {
+		t.Fatal("empty compact")
+	}
+}
+
 func TestMaxBlob_connectedRegion(t *testing.T) {
 	// Two separate single cells → blob 1
 	ch := make([]bool, thumbSize)

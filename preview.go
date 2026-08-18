@@ -102,7 +102,10 @@ func (w *CameraWorker) previewJPEGBytes() ([]byte, error) {
 		return jpg, nil
 	}
 
-	aus := w.copyLatestSubs()
+	aus, gen := w.snapshotLooksee()
+	if w.afterLookseeCopy != nil {
+		w.afterLookseeCopy()
+	}
 	if len(aus) == 0 {
 		return nil, fmt.Errorf("warming up — wait 1–2s")
 	}
@@ -115,7 +118,7 @@ func (w *CameraWorker) previewJPEGBytes() ([]byte, error) {
 
 	rgb, pw, ph, err := decodeAUsToRGBFit(aus, previewMaxW, previewMaxH, codec)
 	if err != nil {
-		if stale := w.cachedPreviewJPEG(); stale != nil {
+		if stale := w.cachedPreviewJPEGAtGen(gen); stale != nil {
 			return stale, nil
 		}
 		return nil, err
@@ -124,7 +127,9 @@ func (w *CameraWorker) previewJPEGBytes() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	w.storePreviewJPEG(jpg)
+	if !w.storePreviewJPEGAtGen(jpg, gen) {
+		return nil, fmt.Errorf("warming up — wait 1–2s")
+	}
 	return jpg, nil
 }
 

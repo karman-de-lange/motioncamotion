@@ -64,6 +64,8 @@ func isVideoKeyframe(au [][]byte) bool {
 }
 
 func (w *CameraWorker) runSub(ctx context.Context) {
+	defer w.clearLooksee()
+
 	u, err := base.ParseURL(w.cfg.Sub)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s sub: %v\n", w.cfg.Name, err)
@@ -76,6 +78,11 @@ func (w *CameraWorker) runSub(ctx context.Context) {
 		return
 	}
 	defer c.Close()
+	defer w.clearLooksee()
+	go func() {
+		<-ctx.Done()
+		c.Close()
+	}()
 
 	desc, _, err := c.Describe(u)
 	if err != nil {
@@ -161,7 +168,7 @@ func (w *CameraWorker) runSubDecoded(
 	softErr func(error) bool,
 	toAnnexB func([][]byte) []byte,
 	onDecodedFrame func(), // optional (H.264: stop re-injecting SPS/PPS)
-	onHardErr func(),      // optional (H.264: re-allow SPS after decoder recreate)
+	onHardErr func(), // optional (H.264: re-allow SPS after decoder recreate)
 ) {
 	dec, rc := NewFrameDecoder(codec)
 	if rc != 0 || dec == nil {
@@ -300,12 +307,13 @@ func (w *CameraWorker) runSubDecoded(
 		lastThumbAt = now
 
 		tRing.push(thumb)
-		sad, blob, ready := motionScoreTemporal(tRing, w.avgFrames, w.lagFrames, w.ignore, recentBuf, olderBuf)
+		sad, blob, nCh, ready := motionScoreTemporal(tRing, w.avgFrames, w.lagFrames, w.ignore, recentBuf, olderBuf)
 		if !ready {
 			return
 		}
 
-		if sad >= w.sadCutoff && blob >= w.minBlob {
+		compactOK := w.minCompact <= 0 || compactness(blob, nCh) >= w.minCompact
+		if sad >= w.sadCutoff && blob >= w.minBlob && compactOK {
 			if streak < w.sustainFrames {
 				streak++
 			}
@@ -327,6 +335,9 @@ func (w *CameraWorker) runSubDecoded(
 		fmt.Fprintf(os.Stderr, "%s sub: %v\n", w.cfg.Name, err)
 		return
 	}
+	if ctx.Err() == nil {
+		w.setStatus("connected")
+	}
 
 	// Frozen sub: RTSP stays up but AUs stop (looksee stuck, motion never fires).
 	// Close after 5s with no AU so Run() reconnects.
@@ -334,8 +345,11 @@ func (w *CameraWorker) runSubDecoded(
 	go func() {
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
-		// Grace period after Play before treating "no AU yet" as stale.
-		time.Sleep(subAUStale)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(subAUStale):
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -343,6 +357,8 @@ func (w *CameraWorker) runSubDecoded(
 			case <-t.C:
 				if w.subAUStale(subAUStale) {
 					fmt.Fprintf(os.Stderr, "%s sub: no AU for %s — reconnecting\n", w.cfg.Name, subAUStale)
+					w.setStatus("reconnecting")
+					w.clearLooksee()
 					c.Close()
 					return
 				}
@@ -350,16 +366,7 @@ func (w *CameraWorker) runSubDecoded(
 		}
 	}()
 
-	go func() {
-		<-ctx.Done()
-		c.Close()
-	}()
-
 	done := make(chan error, 1)
 	go func() { done <- c.Wait() }()
-
-	select {
-	case <-ctx.Done():
-	case <-done:
-	}
+	<-done
 }

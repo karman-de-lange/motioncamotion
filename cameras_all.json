@@ -1,13 +1,13 @@
 {
   "threshold": 0.03,
   "buffer_mb": 200,
-  "motion_sustain_frames": 3,
+  "motion_sustain_frames": 2,
   "motion_cooldown_sec": 3,
-  "motion_min_blob": 8,
+  "motion_min_blob": 6,
   "model": "models/yolov8n.onnx",
   "device": "GPU",
   "sub_conf": 0.5,
-  "main_conf": 0.65,
+  "main_conf": 0.45,
   "force_stage2": true,
   "fake_motion_sec": 0,
   "preview_addr": ":8088",
@@ -20,18 +20,27 @@
       "name": "hik1",
       "main": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/101",
       "sub": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/102",
+      "threshold": 0.015,
+      "motion_min_blob": 4,
+      "motion_sustain_frames": 2,
       "motion_masks": [{"x": 0.0, "y": 0.0, "w": 0.28, "h": 0.07}]
     },
     {
       "name": "hik2",
       "main": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/201",
       "sub": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/202",
+      "threshold": 0.015,
+      "motion_min_blob": 4,
+      "motion_sustain_frames": 2,
       "motion_masks": [{"x": 0.0, "y": 0.0, "w": 0.28, "h": 0.06}]
     },
     {
       "name": "hik3",
       "main": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/301",
       "sub": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/302",
+      "threshold": 0.015,
+      "motion_min_blob": 4,
+      "motion_sustain_frames": 2,
       "motion_masks": [{"x": 0.17, "y": 0.0, "w": 0.30, "h": 0.06}]
     },
     {
@@ -68,18 +77,30 @@
       "name": "cam118",
       "main": "rtsp://admin:L29543ED@10.3.1.55:554/cam/realmonitor?channel=1&subtype=0",
       "sub": "rtsp://admin:L29543ED@10.3.1.55:554/cam/realmonitor?channel=1&subtype=1",
+      "threshold": 0.05,
+      "motion_min_blob": 16,
+      "motion_min_compact": 0.35,
+      "motion_cooldown_sec": 15,
       "motion_masks": [{"x": 0.71, "y": 0.03, "w": 0.29, "h": 0.06}]
     },
     {
       "name": "cam56",
       "main": "rtsp://admin:L246829E@10.3.1.56:554/cam/realmonitor?channel=1&subtype=0",
       "sub": "rtsp://admin:L246829E@10.3.1.56:554/cam/realmonitor?channel=1&subtype=1",
+      "threshold": 0.05,
+      "motion_min_blob": 16,
+      "motion_min_compact": 0.35,
+      "motion_cooldown_sec": 15,
       "motion_masks": [{"x": 0.71, "y": 0.03, "w": 0.28, "h": 0.07}]
     },
     {
       "name": "cam57",
       "main": "rtsp://admin:L255CEA4@10.3.1.57:554/cam/realmonitor?channel=1&subtype=0",
       "sub": "rtsp://admin:L255CEA4@10.3.1.57:554/cam/realmonitor?channel=1&subtype=1",
+      "threshold": 0.05,
+      "motion_min_blob": 16,
+      "motion_min_compact": 0.35,
+      "motion_cooldown_sec": 15,
       "motion_masks": [{"x": 0.71, "y": 0.03, "w": 0.29, "h": 0.06}]
     }
   ]

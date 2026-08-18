@@ -13,7 +13,7 @@ func TestThumbRing_meanAndTemporal(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		r.push(frame)
 	}
-	sad, blob, ready := motionScoreTemporal(r, 3, 6, nil, recent, older)
+	sad, blob, _, ready := motionScoreTemporal(r, 3, 6, nil, recent, older)
 	if !ready {
 		t.Fatal("expected ready")
 	}
@@ -31,7 +31,7 @@ func TestThumbRing_meanAndTemporal(t *testing.T) {
 	}
 	// Need more history: older still dark, recent bright
 	// Ring now: ... dark, dark, bright,bright,bright
-	sad, blob, ready = motionScoreTemporal(r, 3, 6, nil, recent, older)
+	sad, blob, _, ready = motionScoreTemporal(r, 3, 6, nil, recent, older)
 	if !ready {
 		t.Fatal("expected ready after bright")
 	}
@@ -59,7 +59,7 @@ func TestThumbRing_singleFrameGlitch(t *testing.T) {
 	r.push(flash)
 	r.push(dark)
 	r.push(dark)
-	sad, blob, ready := motionScoreTemporal(r, 3, 6, nil, recent, older)
+	sad, blob, _, ready := motionScoreTemporal(r, 3, 6, nil, recent, older)
 	if !ready {
 		t.Fatal("ready")
 	}

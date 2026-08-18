@@ -36,6 +36,16 @@ func (r *ringBuffer) push(data []byte) {
 	}
 }
 
+func (r *ringBuffer) clear() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.chunks = nil
+	r.total = 0
+	r.mu.Unlock()
+}
+
 func (r *ringBuffer) trim(keep time.Duration) {
 	cutoff := time.Now().Add(-keep)
 

@@ -78,7 +78,7 @@ func (r *thumbRing) meanAge(dst []byte, startAge, n int) bool {
 // motionScoreTemporal averages the newest avgN thumbs vs the avgN thumbs
 // starting lag frames ago, then runs SAD+blob (same gates as before).
 // ready=false until the ring has lag+avgN samples.
-func motionScoreTemporal(r *thumbRing, avgN, lag int, ignore []bool, recentBuf, olderBuf []byte) (sad float64, blob int, ready bool) {
+func motionScoreTemporal(r *thumbRing, avgN, lag int, ignore []bool, recentBuf, olderBuf []byte) (sad float64, blob, nChanged int, ready bool) {
 	if avgN < 1 {
 		avgN = 1
 	}
@@ -88,15 +88,20 @@ func motionScoreTemporal(r *thumbRing, avgN, lag int, ignore []bool, recentBuf, 
 	}
 	need := lag + avgN
 	if r.Len() < need {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	if !r.meanAge(recentBuf, 0, avgN) {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	if !r.meanAge(olderBuf, lag, avgN) {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	sad, changed := sadMotion(olderBuf, recentBuf, ignore)
 	blob = maxBlob(changed, thumbW, thumbH)
-	return sad, blob, true
+	for _, c := range changed {
+		if c {
+			nChanged++
+		}
+	}
+	return sad, blob, nChanged, true
 }

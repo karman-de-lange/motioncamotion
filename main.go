@@ -26,6 +26,7 @@ type Config struct {
 	MotionMinBlob       int      `json:"motion_min_blob"`       // min connected changed cells; default 8
 	MotionAvgFrames     int      `json:"motion_avg_frames"`     // mean last N thumbs (noise); default 3
 	MotionLagFrames     int      `json:"motion_lag_frames"`     // older window start (slow motion); default 8
+	MotionMinCompact    float64  `json:"motion_min_compact"`    // blob/nChanged; 0 = off
 	Model               string   `json:"model"`
 	Device              string   `json:"device"`
 	SubConf             float64  `json:"sub_conf"`
@@ -35,24 +36,29 @@ type Config struct {
 	FakeMotionMinSec    int      `json:"fake_motion_min_sec"`
 	FakeMotionMaxSec    int      `json:"fake_motion_max_sec"`
 	Headless            bool     `json:"headless"`
-	PreviewAddr         string   `json:"preview_addr"` // e.g. ":8088"; empty = off
-	ClipDir             string   `json:"clip_dir"`     // legacy; prefer media_dir
-	ClipCams            []string `json:"clip_cams"`    // legacy filter (unused if media_dir set)
-	MediaDir            string   `json:"media_dir"`    // root for motion clips + alert stills
+	PreviewAddr         string   `json:"preview_addr"`       // e.g. ":8088"; empty = off
+	ClipDir             string   `json:"clip_dir"`           // legacy; prefer media_dir
+	ClipCams            []string `json:"clip_cams"`          // legacy filter (unused if media_dir set)
+	MediaDir            string   `json:"media_dir"`          // root for motion clips + alert stills
 	MediaMaxAgeDays     int      `json:"media_max_age_days"` // prune older; 0 = off, default 7
 	MediaMaxMB          int      `json:"media_max_mb"`       // prune oldest when over size; 0 = off, default 2048
-	TLSDomain           string   `json:"tls_domain"`   // optional Let's Encrypt hostname
-	TLSEmail            string   `json:"tls_email"`    // ACME registration email
-	TLSCert             string   `json:"tls_cert"`     // optional PEM cert path
-	TLSKey              string   `json:"tls_key"`      // optional PEM key path
+	TLSDomain           string   `json:"tls_domain"`         // optional Let's Encrypt hostname
+	TLSEmail            string   `json:"tls_email"`          // ACME registration email
+	TLSCert             string   `json:"tls_cert"`           // optional PEM cert path
+	TLSKey              string   `json:"tls_key"`            // optional PEM key path
 	Cameras             []Camera `json:"cameras"`
 }
 
 type Camera struct {
-	Name        string       `json:"name"`
-	Main        string       `json:"main"`
-	Sub         string       `json:"sub"`
-	MotionMasks []MotionMask `json:"motion_masks"` // normalized 0–1 rects ignored by SAD (OSD etc.)
+	Name                string       `json:"name"`
+	Main                string       `json:"main"`
+	Sub                 string       `json:"sub"`
+	MotionMasks         []MotionMask `json:"motion_masks"`
+	Threshold           float64      `json:"threshold,omitempty"`
+	MotionSustainFrames int          `json:"motion_sustain_frames,omitempty"`
+	MotionMinBlob       int          `json:"motion_min_blob,omitempty"`
+	MotionMinCompact    float64      `json:"motion_min_compact,omitempty"`
+	MotionCooldownSec   int          `json:"motion_cooldown_sec,omitempty"`
 }
 
 type cpuSampler struct {
@@ -241,6 +247,9 @@ func main() {
 
 	workers := make([]*CameraWorker, len(cfg.Cameras))
 	for i, cam := range cfg.Cameras {
+		if cam.MotionMinCompact == 0 {
+			cam.MotionMinCompact = cfg.MotionMinCompact
+		}
 		workers[i] = NewCameraWorker(cam, sadCutoff, maxBuf, cfg.MotionSustainFrames, cfg.MotionMinBlob, cfg.MotionAvgFrames, cfg.MotionLagFrames, cooldown, detectQ, logQ)
 		go workers[i].Run(ctx)
 	}

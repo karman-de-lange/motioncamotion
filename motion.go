@@ -81,6 +81,13 @@ func sadMotion(prev, curr []byte, ignore []bool) (pct float64, changed []bool) {
 	return float64(nChanged) / float64(active) * 100, changed
 }
 
+func compactness(blob, nChanged int) float64 {
+	if nChanged <= 0 {
+		return 0
+	}
+	return float64(blob) / float64(nChanged)
+}
+
 // maxBlob returns the largest 4-connected region of changed cells.
 func maxBlob(changed []bool, w, h int) int {
 	if len(changed) != w*h {
