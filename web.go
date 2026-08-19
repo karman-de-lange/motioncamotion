@@ -237,9 +237,6 @@ func applyAndSaveSettings(path string, byName map[string]*CameraWorker, updates 
 		if u.MotionMinCompact < 0 || u.MotionMinCompact > 1 {
 			return fmt.Errorf("%s: motion_min_compact out of range", u.Name)
 		}
-		if u.MotionCooldownSec < 0 || u.MotionCooldownSec > 300 {
-			return fmt.Errorf("%s: motion_cooldown_sec out of range", u.Name)
-		}
 		if u.MotionSustainFrames < 1 || u.MotionSustainFrames > 30 {
 			return fmt.Errorf("%s: motion_sustain_frames out of range", u.Name)
 		}
@@ -660,14 +657,13 @@ const webAppJS = `
   function loadSettings(){
     fetch('/api/settings').then(function(r){return r.json();}).then(function(data){
       var cams=data.cameras||[];
-      var h='<table><thead><tr><th>Camera</th><th>Threshold</th><th>Min blob</th><th>Compact</th><th>Cooldown s</th><th>Sustain</th></tr></thead><tbody>';
+      var h='<table><thead><tr><th>Camera</th><th>Threshold</th><th>Min blob</th><th>Compact</th><th>Sustain</th></tr></thead><tbody>';
       cams.forEach(function(c){
         h+='<tr data-cam="'+esc(c.name)+'">'
           +'<td>'+esc(c.name)+'</td>'
           +'<td><input data-f="threshold" type="number" step="0.005" min="0.005" max="0.5" value="'+c.threshold+'"></td>'
           +'<td><input data-f="motion_min_blob" type="number" step="1" min="1" max="200" value="'+c.motion_min_blob+'"></td>'
           +'<td><input data-f="motion_min_compact" type="number" step="0.05" min="0" max="1" value="'+c.motion_min_compact+'"></td>'
-          +'<td><input data-f="motion_cooldown_sec" type="number" step="1" min="0" max="300" value="'+c.motion_cooldown_sec+'"></td>'
           +'<td><input data-f="motion_sustain_frames" type="number" step="1" min="1" max="30" value="'+c.motion_sustain_frames+'"></td>'
           +'</tr>';
       });
@@ -688,7 +684,6 @@ const webAppJS = `
         threshold: num('threshold'),
         motion_min_blob: parseInt(tr.querySelector('[data-f="motion_min_blob"]').value,10),
         motion_min_compact: num('motion_min_compact'),
-        motion_cooldown_sec: parseInt(tr.querySelector('[data-f="motion_cooldown_sec"]').value,10),
         motion_sustain_frames: parseInt(tr.querySelector('[data-f="motion_sustain_frames"]').value,10)
       });
     });

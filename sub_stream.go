@@ -320,12 +320,7 @@ func (w *CameraWorker) runSubDecoded(
 				streak++
 			}
 			if streak >= w.sustainFrames {
-				kind := sampleHot
-				if !w.episode {
-					kind = sampleOpen
-					w.episode = true
-				}
-				w.enqueueDetect(kind, "motion", sad, nil)
+				w.fireMotion(sad)
 				tRing.clear()
 				streak = 0
 			}
@@ -334,7 +329,6 @@ func (w *CameraWorker) runSubDecoded(
 			if w.episode {
 				quietN++
 				if quietN >= w.sustainFrames {
-					w.enqueueDetect(sampleClose, "motion", sad, nil)
 					w.episode = false
 					quietN = 0
 				}

@@ -43,15 +43,68 @@ func (s *closeWaitStub) wait(ctx context.Context) {
 	<-s.closed
 }
 
+func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions(fakeCPU(0))
+	w.fireMotion(4)
+	if w.episode {
+		t.Fatal("empty ring latched episode")
+	}
+	if _, _, ok := w.adm.pull(); ok {
+		t.Fatal("marked without segments")
+	}
+	w.ring.push([]byte("au"))
+	w.fireMotion(4)
+	ev, opened, ok := w.adm.pull()
+	if !ok {
+		t.Fatal("expected mark after ring has AUs")
+	}
+	if !opened || ev.SAD != 4 {
+		t.Fatalf("first successful mark must be open sad=%v opened=%v", ev.SAD, opened)
+	}
+}
+
+func TestEnqueueDetect_emptyRingNoMark(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions(fakeCPU(0))
+	if w.enqueueDetect("motion", 1, true) {
+		t.Fatal("empty ring reported mark")
+	}
+	if _, _, ok := w.adm.pull(); ok {
+		t.Fatal("marked without segments")
+	}
+}
+
+func TestEnqueueDetect_latestOverwrite(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions(fakeCPU(0))
+	w.ring.push([]byte("au"))
+	w.enqueueDetect("motion", 1, true)
+	w.enqueueDetect("motion", 2, false)
+	ev, opened, ok := w.adm.pull()
+	if !ok {
+		t.Fatal("expected latest")
+	}
+	if ev.SAD != 2 {
+		t.Fatalf("want overwritten sad=2 got %v", ev.SAD)
+	}
+	if !opened {
+		t.Fatal("open must survive overwrite")
+	}
+	if _, _, ok := w.adm.pull(); ok {
+		t.Fatal("only one latest per cam")
+	}
+}
+
 func TestApplyMotion_updatesGates(t *testing.T) {
-	w := NewCameraWorker(Camera{Name: "c"}, 3, 1024, 2, 6, 3, 6, 3*time.Second, nil, nil)
+	w := NewCameraWorker(Camera{Name: "c"}, 3, 1024, 2, 6, 3, 6, nil)
 	w.ApplyMotion(camMotionSettings{
 		Name: "c", Threshold: 0.08, MotionMinBlob: 20,
-		MotionMinCompact: 0.4, MotionCooldownSec: 12, MotionSustainFrames: 4,
+		MotionMinCompact: 0.4, MotionSustainFrames: 4,
 	})
 	got := w.MotionSettings()
 	if got.Threshold < 0.079 || got.Threshold > 0.081 || got.MotionMinBlob != 20 ||
-		got.MotionMinCompact != 0.4 || got.MotionCooldownSec != 12 || got.MotionSustainFrames != 4 {
+		got.MotionMinCompact != 0.4 || got.MotionSustainFrames != 4 {
 		t.Fatalf("settings %+v", got)
 	}
 }
@@ -339,5 +392,21 @@ func TestStreamWith_clearsMainRing(t *testing.T) {
 	waitDone(t, done, "streamWith blocked")
 	if got := w.ring.snapshot(time.Hour); len(got) != 0 {
 		t.Fatalf("ring still has %d chunks after streamWith", len(got))
+	}
+}
+
+func TestStreamWith_clearsEpisode(t *testing.T) {
+	w := &CameraWorker{ring: newRingBuffer(64 * 1024), episode: true}
+	done := make(chan struct{})
+	go func() {
+		w.streamWith(context.Background(),
+			func(context.Context) {},
+			func(context.Context) {},
+		)
+		close(done)
+	}()
+	waitDone(t, done, "streamWith blocked")
+	if w.episode {
+		t.Fatal("episode still set after stream session start")
 	}
 }

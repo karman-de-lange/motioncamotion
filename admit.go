@@ -1,52 +1,32 @@
 package main
 
-import (
-	"sync"
-	"time"
-)
+import "sync"
 
-type sampleKind int
-
-const (
-	sampleOpen sampleKind = iota
-	sampleHot
-	sampleClose
-)
-
-const (
-	admitCPUMax = 70.0
-	admitQBusy  = 8
-	admitHotGap = 500 * time.Millisecond
-)
+const admitCPUMax = 70.0
 
 type cpuPercent interface {
 	Percent() float64
 }
 
 type camSlot struct {
-	inflight bool
-	pending  *DetectEvent
-	lastHot  time.Time
+	latest *DetectEvent
+	opened bool
 }
 
 type admissions struct {
-	q      chan DetectEvent
 	cpu    cpuPercent
 	cpuMax float64
-	qBusy  int
-	hotGap time.Duration
+	wake   chan struct{}
 
 	mu   sync.Mutex
 	cams map[string]*camSlot
 }
 
-func newAdmissions(q chan DetectEvent, cpu cpuPercent) *admissions {
+func newAdmissions(cpu cpuPercent) *admissions {
 	return &admissions{
-		q:      q,
 		cpu:    cpu,
 		cpuMax: admitCPUMax,
-		qBusy:  admitQBusy,
-		hotGap: admitHotGap,
+		wake:   make(chan struct{}, 1),
 		cams:   make(map[string]*camSlot),
 	}
 }
@@ -61,81 +41,69 @@ func (a *admissions) slot(cam string) *camSlot {
 }
 
 func (a *admissions) loadHigh() bool {
-	if a.cpu != nil && a.cpu.Percent() > a.cpuMax {
-		return true
-	}
-	return len(a.q) >= a.qBusy
+	return a.cpu != nil && a.cpu.Percent() > a.cpuMax
 }
 
-// submit admits a YOLO sample. Open is never dropped for CPU/queue (may replace
-// a pending Hot/Close). Hot is capped at hotGap and dropped when load is high.
-func (a *admissions) submit(cam string, kind sampleKind, ev DetectEvent) bool {
+func (a *admissions) signal() {
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
+}
+
+// mark overwrites this camera's latest sample. opened sticks until pull.
+func (a *admissions) mark(cam string, ev DetectEvent, opened bool) {
 	if a == nil {
-		return false
+		return
 	}
 	a.mu.Lock()
 	s := a.slot(cam)
-	if kind == sampleHot && !s.lastHot.IsZero() && time.Since(s.lastHot) < a.hotGap {
-		a.mu.Unlock()
-		return false
+	s.latest = &ev
+	if opened {
+		s.opened = true
 	}
-	if kind != sampleOpen && a.loadHigh() {
-		a.mu.Unlock()
-		return false
-	}
-	if kind == sampleHot {
-		s.lastHot = time.Now()
-	}
-	ev.kind = kind
-	if s.inflight {
-		s.pending = &ev
-		a.mu.Unlock()
-		return true
-	}
-	s.inflight = true
-	ev.done = func() { a.release(cam) }
 	a.mu.Unlock()
-	if a.enqueue(ev, kind == sampleOpen) {
-		return true
-	}
-	a.release(cam)
-	return false
+	a.signal()
 }
 
-func (a *admissions) enqueue(ev DetectEvent, block bool) bool {
-	select {
-	case a.q <- ev:
-		return true
-	default:
-		if !block {
-			return false
-		}
-		a.q <- ev
-		return true
+// pull takes one latest sample. When CPU is high, only a cam that just opened.
+func (a *admissions) pull() (ev DetectEvent, opened bool, ok bool) {
+	if a == nil {
+		return DetectEvent{}, false, false
 	}
-}
-
-func (a *admissions) release(cam string) {
 	a.mu.Lock()
-	s := a.cams[cam]
-	if s == nil {
-		a.mu.Unlock()
-		return
+	defer a.mu.Unlock()
+	if ev, opened, ok = a.takeOpened(); ok {
+		return ev, opened, true
 	}
-	p := s.pending
-	s.pending = nil
-	if p == nil {
-		s.inflight = false
-		a.mu.Unlock()
-		return
+	if a.loadHigh() {
+		return DetectEvent{}, false, false
 	}
-	p.done = func() { a.release(cam) }
-	a.mu.Unlock()
-	if !a.enqueue(*p, false) {
-		a.mu.Lock()
-		if a.cams[cam] != nil {
-			a.cams[cam].inflight = false
+	return a.takeAny()
+}
+
+func (a *admissions) takeOpened() (DetectEvent, bool, bool) {
+	for _, s := range a.cams {
+		if s.latest != nil && s.opened {
+			return a.take(s)
 		}
-		a.mu.Unlock()
 	}
+	return DetectEvent{}, false, false
+}
+
+func (a *admissions) takeAny() (DetectEvent, bool, bool) {
+	for _, s := range a.cams {
+		if s.latest != nil {
+			return a.take(s)
+		}
+	}
+	return DetectEvent{}, false, false
+}
+
+func (a *admissions) take(s *camSlot) (DetectEvent, bool, bool) {
+	ev := *s.latest
+	opened := s.opened
+	s.latest = nil
+	s.opened = false
+	return ev, opened, true
 }

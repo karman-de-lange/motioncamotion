@@ -22,7 +22,6 @@ type Config struct {
 	Threshold           float64  `json:"threshold"`
 	BufferMB            int      `json:"buffer_mb"`
 	MotionSustainFrames int      `json:"motion_sustain_frames"` // consecutive SAD hits; default 3
-	MotionCooldownSec   int      `json:"motion_cooldown_sec"`   // per-cam silence after fire; default 3
 	MotionMinBlob       int      `json:"motion_min_blob"`       // min connected changed cells; default 8
 	MotionAvgFrames     int      `json:"motion_avg_frames"`     // mean last N thumbs (noise); default 3
 	MotionLagFrames     int      `json:"motion_lag_frames"`     // older window start (slow motion); default 8
@@ -58,7 +57,6 @@ type Camera struct {
 	MotionSustainFrames int          `json:"motion_sustain_frames,omitempty"`
 	MotionMinBlob       int          `json:"motion_min_blob,omitempty"`
 	MotionMinCompact    float64      `json:"motion_min_compact,omitempty"`
-	MotionCooldownSec   int          `json:"motion_cooldown_sec,omitempty"`
 }
 
 type cpuSampler struct {
@@ -127,10 +125,6 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.MotionSustainFrames <= 0 {
 		cfg.MotionSustainFrames = 3
-	}
-	// 0 = off (YOLO admission is load-based, not a motion mute).
-	if cfg.MotionCooldownSec < 0 {
-		cfg.MotionCooldownSec = 0
 	}
 	if cfg.MotionMinBlob <= 0 {
 		cfg.MotionMinBlob = 8
@@ -205,7 +199,6 @@ func patchCameraSettings(path string, updates []camMotionSettings) error {
 		c["threshold"] = u.Threshold
 		c["motion_min_blob"] = u.MotionMinBlob
 		c["motion_min_compact"] = u.MotionMinCompact
-		c["motion_cooldown_sec"] = u.MotionCooldownSec
 		c["motion_sustain_frames"] = u.MotionSustainFrames
 	}
 	raw, err := json.Marshal(cams)
@@ -243,7 +236,6 @@ func main() {
 
 	sadCutoff := cfg.Threshold * 100
 	maxBuf := cfg.BufferMB << 20
-	cooldown := time.Duration(cfg.MotionCooldownSec) * time.Second
 
 	inf, err := newOVInfer(cfg.Model, cfg.Device)
 	if err != nil {
@@ -255,10 +247,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	detectQ := make(chan DetectEvent, 16)
 	logQ := make(chan string, 256)
 	cpu := &cpuSampler{}
-	adm := newAdmissions(detectQ, cpu)
+	adm := newAdmissions(cpu)
 
 	store, err := newEventStore(cfg.MediaDir, cfg.MediaMaxAgeDays, cfg.MediaMaxMB)
 	if err != nil {
@@ -287,19 +278,15 @@ func main() {
 		}
 	}()
 
-	yc := yoloConfig{
-		SubConf:     cfg.SubConf,
-		MainConf:    cfg.MainConf,
-		ForceStage2: cfg.ForceStage2,
-	}
-	go runYOLOWorker(ctx, detectQ, logQ, store, inf, yc)
+	yc := yoloConfig{MainConf: cfg.MainConf}
+	go runYOLOWorker(ctx, adm, logQ, store, inf, yc)
 
 	workers := make([]*CameraWorker, len(cfg.Cameras))
 	for i, cam := range cfg.Cameras {
 		if cam.MotionMinCompact == 0 {
 			cam.MotionMinCompact = cfg.MotionMinCompact
 		}
-		workers[i] = NewCameraWorker(cam, sadCutoff, maxBuf, cfg.MotionSustainFrames, cfg.MotionMinBlob, cfg.MotionAvgFrames, cfg.MotionLagFrames, cooldown, detectQ, logQ)
+		workers[i] = NewCameraWorker(cam, sadCutoff, maxBuf, cfg.MotionSustainFrames, cfg.MotionMinBlob, cfg.MotionAvgFrames, cfg.MotionLagFrames, logQ)
 		workers[i].adm = adm
 		go workers[i].Run(ctx)
 	}

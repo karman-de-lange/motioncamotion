@@ -122,7 +122,7 @@ static void nv12_to_rgb_fill(const uint8_t *y, const uint8_t *uv, int pitch, int
     }
 }
 
-/* HEVC Data.UV is often a valid pointer to zeros → NV12 convert is pure green. */
+/* Probe: HEVC Data.UV is often a valid pointer to zeros (mean near 0; live NV12 ~128). */
 int vpl_uv_plane_dead(const uint8_t *uv, int pitch, int src_w, int src_h) {
     if (!uv || pitch < 2 || src_w < 2 || src_h < 2) {
         return 1;
@@ -132,17 +132,18 @@ int vpl_uv_plane_dead(const uint8_t *uv, int pitch, int src_w, int src_h) {
     if (uw > pitch) {
         uw = pitch & ~1;
     }
-    unsigned seen = 0;
+    int su = 0, sv = 0;
     for (int i = 0; i < 8; i++) {
         int row = (uh * i) / 8;
         int col = ((uw * i) / 8) & ~1;
         if (col + 1 >= uw) {
             col = 0;
         }
-        seen |= uv[(size_t)row * (size_t)pitch + (size_t)col];
-        seen |= uv[(size_t)row * (size_t)pitch + (size_t)col + 1];
+        su += uv[(size_t)row * (size_t)pitch + (size_t)col];
+        sv += uv[(size_t)row * (size_t)pitch + (size_t)col + 1];
     }
-    return seen == 0;
+    /* Live NV12 is ~128. Zero/garbage HEVC UV averages near 0. */
+    return su < 40 * 8 && sv < 40 * 8;
 }
 
 /* Plain luma → grayscale RGB for looksee (no chroma, no histogram tricks). */
@@ -523,8 +524,10 @@ int vpl_decoder_thumb_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
     return rc;
 }
 
-int vpl_decoder_rgb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *rgb_out, int rgb_cap, int out_w, int out_h) {
-    if (!d || !data || len == 0 || !rgb_out || out_w <= 0 || out_h <= 0 || rgb_cap < out_w * out_h * 3) {
+int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
+                     uint8_t *y_out, int y_cap, uint8_t *uv_out, int uv_cap,
+                     int *out_w, int *out_h) {
+    if (!d || !data || len == 0 || !y_out || !uv_out || !out_w || !out_h) {
         return -1;
     }
 
@@ -547,17 +550,30 @@ int vpl_decoder_rgb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *rgb
         decoded->FrameInterface->Release(decoded);
         return -96;
     }
+    *out_w = w;
+    *out_h = h;
+    int yneed = w * h;
+    int uvneed = w * (h / 2);
+    if (y_cap < yneed || uv_cap < uvneed) {
+        decoded->FrameInterface->Unmap(decoded);
+        decoded->FrameInterface->Release(decoded);
+        return -2;
+    }
+    for (int row = 0; row < h; row++) {
+        memcpy(y_out + (size_t)row * (size_t)w, y + (size_t)row * (size_t)pitch, (size_t)w);
+    }
+    int uh = h / 2;
     int surf_h = decoded->Info.Height > 0 ? (int)decoded->Info.Height : h;
     const uint8_t *uv_base = surface_uv(decoded, pitch, surf_h);
-    const uint8_t *uv = NULL;
-    if (uv_base) {
-        uv = uv_base + (size_t)(decoded->Info.CropY / 2) * (size_t)pitch
-                    + (size_t)(decoded->Info.CropX & ~1);
-        if (vpl_uv_plane_dead(uv, pitch, w, h)) {
-            uv = NULL;
+    if (uv_base && uh > 0) {
+        const uint8_t *uv = uv_base + (size_t)(decoded->Info.CropY / 2) * (size_t)pitch
+                                    + (size_t)(decoded->Info.CropX & ~1);
+        for (int row = 0; row < uh; row++) {
+            memcpy(uv_out + (size_t)row * (size_t)w, uv + (size_t)row * (size_t)pitch, (size_t)w);
         }
+    } else if (uvneed > 0) {
+        memset(uv_out, 0, (size_t)uvneed);
     }
-    vpl_nv12_letterbox_rgb(y, uv, pitch, w, h, rgb_out, out_w, out_h);
 
     decoded->FrameInterface->Unmap(decoded);
     decoded->FrameInterface->Release(decoded);

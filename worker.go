@@ -31,13 +31,11 @@ type CameraWorker struct {
 	minCompact    float64 // 0 = no compactness gate
 	avgFrames     int     // temporal mean window (noise kill)
 	lagFrames     int     // older window offset (slow human motion)
-	cooldown      time.Duration
 	ignore        []bool
 	status        string
 
 	mu               sync.Mutex
 	ring             *ringBuffer
-	lastMotionAt     time.Time
 	subCodec         int    // CodecHEVC or CodecAVC
 	subSPS           []byte // H.264 SDP params for preview / IDR
 	subPPS           []byte
@@ -50,14 +48,13 @@ type CameraWorker struct {
 	adm              *admissions
 	episode          bool
 
-	detectQ chan<- DetectEvent
-	logQ    chan<- string
+	logQ chan<- string
 }
 
 // Keep enough AUs for H.264 looksee to always include an IDR (Imou ~15fps, GOP often 2–4s).
 const previewAUKeep = 64
 
-func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBlob, avgFrames, lagFrames int, cooldown time.Duration, detectQ chan<- DetectEvent, logQ chan<- string) *CameraWorker {
+func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBlob, avgFrames, lagFrames int, logQ chan<- string) *CameraWorker {
 	if sustainFrames < 1 {
 		sustainFrames = 1
 	}
@@ -79,11 +76,6 @@ func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBl
 	if cam.MotionMinBlob > 0 {
 		minBlob = cam.MotionMinBlob
 	}
-	if cam.MotionCooldownSec > 0 {
-		cooldown = time.Duration(cam.MotionCooldownSec) * time.Second
-	} else if cam.MotionCooldownSec < 0 {
-		cooldown = 0
-	}
 	return &CameraWorker{
 		cfg:           cam,
 		sadCutoff:     sadCutoff,
@@ -92,25 +84,11 @@ func NewCameraWorker(cam Camera, sadCutoff float64, maxBuf, sustainFrames, minBl
 		minCompact:    cam.MotionMinCompact,
 		avgFrames:     avgFrames,
 		lagFrames:     lagFrames,
-		cooldown:      cooldown,
 		ignore:        buildIgnoreMask(cam.MotionMasks),
 		status:        "reconnecting",
 		ring:          newRingBuffer(maxBuf),
-		detectQ:       detectQ,
 		logQ:          logQ,
 	}
-}
-
-// tryMotionFire returns true if motion may enqueue (cooldown elapsed).
-func (w *CameraWorker) tryMotionFire() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	now := time.Now()
-	if w.cooldown > 0 && !w.lastMotionAt.IsZero() && now.Sub(w.lastMotionAt) < w.cooldown {
-		return false
-	}
-	w.lastMotionAt = now
-	return true
 }
 
 func (w *CameraWorker) setStatus(s string) {
@@ -134,20 +112,17 @@ type camMotionSettings struct {
 	Threshold           float64 `json:"threshold"`
 	MotionMinBlob       int     `json:"motion_min_blob"`
 	MotionMinCompact    float64 `json:"motion_min_compact"`
-	MotionCooldownSec   int     `json:"motion_cooldown_sec"`
 	MotionSustainFrames int     `json:"motion_sustain_frames"`
 }
 
 func (w *CameraWorker) MotionSettings() camMotionSettings {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	cd := int(w.cooldown / time.Second)
 	return camMotionSettings{
 		Name:                w.cfg.Name,
 		Threshold:           w.sadCutoff / 100,
 		MotionMinBlob:       w.minBlob,
 		MotionMinCompact:    w.minCompact,
-		MotionCooldownSec:   cd,
 		MotionSustainFrames: w.sustainFrames,
 	}
 }
@@ -161,11 +136,6 @@ func (w *CameraWorker) ApplyMotion(s camMotionSettings) {
 	}
 	if s.MotionMinCompact >= 0 {
 		w.minCompact = s.MotionMinCompact
-	}
-	if s.MotionCooldownSec >= 0 {
-		w.mu.Lock()
-		w.cooldown = time.Duration(s.MotionCooldownSec) * time.Second
-		w.mu.Unlock()
 	}
 	if s.MotionSustainFrames > 0 {
 		w.sustainFrames = s.MotionSustainFrames
@@ -377,6 +347,7 @@ func (w *CameraWorker) streamWith(ctx context.Context, main, sub func(context.Co
 	if w.ring != nil {
 		w.ring.clear()
 	}
+	w.episode = false
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -486,35 +457,40 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 	}
 }
 
-func (w *CameraWorker) enqueueDetect(kind sampleKind, label string, sad float64, subRGB []byte) {
+func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) bool {
+	if w.ring == nil {
+		return false
+	}
 	segments := w.ring.snapshot(snapshotDur)
 	if len(segments) == 0 {
-		return
+		return false
 	}
 	ev := DetectEvent{
 		Cam:      w.cfg.Name,
 		At:       time.Now(),
 		Segments: segments,
-		SubRGB:   subRGB,
 		SAD:      sad,
 		Label:    label,
 	}
-	ok := true
-	if w.adm != nil {
-		ok = w.adm.submit(w.cfg.Name, kind, ev)
-	} else if w.detectQ != nil {
-		w.detectQ <- ev
-	}
-	if !ok || w.logQ == nil {
-		return
+	w.adm.mark(w.cfg.Name, ev, opened)
+	if w.logQ == nil {
+		return true
 	}
 	if sad >= 0 {
-		w.logQ <- fmt.Sprintf("%s: %s sad=%.1f%% queued %d aus %.1fMB", ev.Cam, label, sad, len(ev.Segments), eventMB(ev))
+		w.logQ <- fmt.Sprintf("%s: %s sad=%.1f%% latest %d aus %.1fMB", ev.Cam, label, sad, len(ev.Segments), eventMB(ev))
 	} else {
-		w.logQ <- fmt.Sprintf("%s: %s queued %d aus %.1fMB", ev.Cam, label, len(ev.Segments), eventMB(ev))
+		w.logQ <- fmt.Sprintf("%s: %s latest %d aus %.1fMB", ev.Cam, label, len(ev.Segments), eventMB(ev))
+	}
+	return true
+}
+
+func (w *CameraWorker) fireMotion(sad float64) {
+	opened := !w.episode
+	if w.enqueueDetect("motion", sad, opened) {
+		w.episode = true
 	}
 }
 
 func (w *CameraWorker) FakeMotion() {
-	w.enqueueDetect(sampleOpen, "fake", -1, nil)
+	w.enqueueDetect("fake", -1, true)
 }

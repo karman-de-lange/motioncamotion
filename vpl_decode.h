@@ -15,7 +15,10 @@ typedef struct VPLDecoder VPLDecoder;
 
 int vpl_decoder_new(VPLDecoder **out, int codec);
 int vpl_decoder_thumb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *y_out, int y_cap);
-int vpl_decoder_rgb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *rgb_out, int rgb_cap, int out_w, int out_h);
+/* Tight-pack NV12 (pitch=width). Returns -2 if y/uv caps too small (*out_w/*out_h set). */
+int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
+                     uint8_t *y_out, int y_cap, uint8_t *uv_out, int uv_cap,
+                     int *out_w, int *out_h);
 /* Letterbox NV12 to dst RGB, pad 114. uv=NULL → limited-range Y as gray. */
 void vpl_nv12_letterbox_rgb(const uint8_t *y, const uint8_t *uv, int pitch,
                             int src_w, int src_h, uint8_t *rgb, int dst_w, int dst_h);

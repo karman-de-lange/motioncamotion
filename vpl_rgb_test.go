@@ -177,6 +177,50 @@ func TestNV12LetterboxPitchAndOdd(t *testing.T) {
 	}
 }
 
+func TestLetterboxInfer_zeroUVGrayNotGreen(t *testing.T) {
+	y := []byte{128, 128, 128, 128}
+	uv := []byte{0, 0, 0, 0}
+	if useChroma(uv, 2, 2, 2) {
+		t.Fatal("zero UV must not use chroma")
+	}
+	rgb := letterboxInferRGB(y, uv, 2, 2, 2, 2, 2)
+	for py := 0; py < 2; py++ {
+		for px := 0; px < 2; px++ {
+			r, g, b := pix(rgb, 2, px, py)
+			if r != g || g != b {
+				t.Fatalf("zero UV must stay gray, got %d,%d,%d at %d,%d", r, g, b, px, py)
+			}
+		}
+	}
+
+	// Same pixels through NV12 (useChroma wrongly true) are green, not gray.
+	green := nv12LetterboxRGB(y, uv, 2, 2, 2, 2, 2)
+	gr, gg, gb := pix(green, 2, 0, 0)
+	if gr == gg && gg == gb {
+		t.Fatal("control: raw zero-UV NV12 should not be gray")
+	}
+	if gg <= gr || gg <= gb {
+		t.Fatalf("control: raw zero-UV NV12 should go green, got %d,%d,%d", gr, gg, gb)
+	}
+}
+
+func TestLetterboxInfer_liveUVColour(t *testing.T) {
+	y := []byte{81, 81, 81, 81}
+	uv := []byte{90, 240, 90, 240}
+	if !useChroma(uv, 2, 2, 2) {
+		t.Fatal("live UV must use chroma")
+	}
+	rgb := letterboxInferRGB(y, uv, 2, 2, 2, 2, 2)
+	for py := 0; py < 2; py++ {
+		for px := 0; px < 2; px++ {
+			r, g, b := pix(rgb, 2, px, py)
+			if r != 255 || g != 0 || b != 0 {
+				t.Fatalf("live UV want red at %d,%d got %d,%d,%d", px, py, r, g, b)
+			}
+		}
+	}
+}
+
 func TestUVPlaneDead(t *testing.T) {
 	if !uvPlaneDead(nil, 8, 8, 8) {
 		t.Fatal("nil should be dead")
@@ -205,9 +249,18 @@ func TestUVPlaneDead(t *testing.T) {
 		t.Fatal("zeros in crop should be dead (padding must not count)")
 	}
 
-	uv[0] = 90
-	uv[1] = 240
+	uv[0] = 5
+	uv[1] = 3
+	if !uvPlaneDead(uv, 16, 8, 8) {
+		t.Fatal("tiny UV garbage should stay dead (else stills go green)")
+	}
+	for row := 0; row < 4; row++ {
+		for col := 0; col < 8; col += 2 {
+			uv[row*16+col] = 128
+			uv[row*16+col+1] = 128
+		}
+	}
 	if uvPlaneDead(uv, 16, 8, 8) {
-		t.Fatal("nonzero crop sample should be live")
+		t.Fatal("chroma-like crop samples should be live")
 	}
 }
