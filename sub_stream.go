@@ -211,6 +211,7 @@ func (w *CameraWorker) runSubDecoded(
 	var moreDataStreak int
 	var streak int
 	var quietN int
+	var floor quietBlob
 	thumb := make([]byte, thumbSize)
 
 	// Rate log: AUs vs live thumbs per second (no oneshot path).
@@ -296,8 +297,12 @@ func (w *CameraWorker) runSubDecoded(
 		now := time.Now()
 		if el := now.Sub(rateWindowStart); el >= time.Second {
 			sec := el.Seconds()
-			w.logQ <- fmt.Sprintf("%s: rate au=%.1f/s live_thumb=%.1f/s",
-				w.cfg.Name, float64(auN)/sec, float64(liveThumbN)/sec)
+			need := 0
+			if floor.ready() {
+				need = floor.need(w.minBlob)
+			}
+			w.logQ <- fmt.Sprintf("%s: rate au=%.1f/s live_thumb=%.1f/s blob≥%d",
+				w.cfg.Name, float64(auN)/sec, float64(liveThumbN)/sec, need)
 			auN, liveThumbN = 0, 0
 			rateWindowStart = now
 		}
@@ -312,25 +317,40 @@ func (w *CameraWorker) runSubDecoded(
 		if !ready {
 			return
 		}
+		// Reconnect / first GOP is ~99% SAD vs an empty lag window — not a person.
+		if sad >= 90 {
+			streak = 0
+			return
+		}
 
-		compactOK := w.minCompact <= 0 || compactness(blob, nCh) >= w.minCompact
-		if sad >= w.sadCutoff && blob >= w.minBlob && compactOK {
+		need := 0
+		if floor.ready() {
+			need = floor.need(w.minBlob)
+		}
+		if motionHit(sad, blob, nCh, w.minBlob, need, w.minCompact) {
 			quietN = 0
 			if streak < w.sustainFrames {
 				streak++
 			}
 			if streak >= w.sustainFrames {
 				w.fireMotion(sad)
-				tRing.clear()
 				streak = 0
 			}
 		} else {
+			if blobLooksQuiet(blob, nCh) {
+				floor.push(blob)
+			}
 			streak = 0
 			if w.episode {
 				quietN++
-				if quietN >= w.sustainFrames {
+				needQuiet := w.lagFrames
+				if needQuiet < 1 {
+					needQuiet = 1
+				}
+				if quietN >= needQuiet {
 					w.episode = false
 					quietN = 0
+					tRing.clear()
 				}
 			}
 		}

@@ -45,7 +45,7 @@ func (s *closeWaitStub) wait(ctx context.Context) {
 
 func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
-	w.adm = newAdmissions(fakeCPU(0))
+	w.adm = newAdmissions()
 	w.fireMotion(4)
 	if w.episode {
 		t.Fatal("empty ring latched episode")
@@ -66,7 +66,7 @@ func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
 
 func TestEnqueueDetect_emptyRingNoMark(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
-	w.adm = newAdmissions(fakeCPU(0))
+	w.adm = newAdmissions()
 	if w.enqueueDetect("motion", 1, true) {
 		t.Fatal("empty ring reported mark")
 	}
@@ -75,24 +75,23 @@ func TestEnqueueDetect_emptyRingNoMark(t *testing.T) {
 	}
 }
 
-func TestEnqueueDetect_latestOverwrite(t *testing.T) {
+func TestEnqueueDetect_queuesMultiple(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
-	w.adm = newAdmissions(fakeCPU(0))
+	w.adm = newAdmissions()
 	w.ring.push([]byte("au"))
-	w.enqueueDetect("motion", 1, true)
-	w.enqueueDetect("motion", 2, false)
+	if !w.enqueueDetect("motion", 1, true) {
+		t.Fatal("first")
+	}
+	if !w.enqueueDetect("motion", 2, false) {
+		t.Fatal("second")
+	}
 	ev, opened, ok := w.adm.pull()
-	if !ok {
-		t.Fatal("expected latest")
+	if !ok || ev.SAD != 1 || !opened {
+		t.Fatalf("want first open sad=1 got sad=%v opened=%v ok=%v", ev.SAD, opened, ok)
 	}
-	if ev.SAD != 2 {
-		t.Fatalf("want overwritten sad=2 got %v", ev.SAD)
-	}
-	if !opened {
-		t.Fatal("open must survive overwrite")
-	}
-	if _, _, ok := w.adm.pull(); ok {
-		t.Fatal("only one latest per cam")
+	ev, opened, ok = w.adm.pull()
+	if !ok || ev.SAD != 2 || opened {
+		t.Fatalf("want second sad=2 got sad=%v opened=%v ok=%v", ev.SAD, opened, ok)
 	}
 }
 

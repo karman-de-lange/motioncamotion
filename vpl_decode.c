@@ -15,6 +15,7 @@ struct VPLDecoder {
     mfxVideoParam dec_par;
     int dec_inited;
     mfxU32 codec_id;
+    int complete_au; /* 1 = one-shot RGB (YOLO); 0 = live sub thumbs */
 };
 
 static void downscale_y(const uint8_t *src, int src_w, int src_h, int src_pitch,
@@ -204,8 +205,7 @@ static int ensure_decoder(VPLDecoder *d, const uint8_t *data, size_t len) {
     bs.Data = (mfxU8 *)data;
     bs.DataLength = (mfxU32)len;
     bs.MaxLength = (mfxU32)len;
-    /* COMPLETE_FRAME only for H.264 — was not used on working HEVC/Hik path. */
-    if (d->codec_id == MFX_CODEC_AVC) {
+    if (d->codec_id == MFX_CODEC_AVC || d->complete_au) {
         bs.DataFlag = MFX_BITSTREAM_COMPLETE_FRAME;
     }
 
@@ -246,6 +246,9 @@ static int decode_one_frame_hevc(VPLDecoder *d, const uint8_t *data, size_t len,
     bs.Data = (mfxU8 *)data;
     bs.DataLength = (mfxU32)len;
     bs.MaxLength = (mfxU32)len;
+    if (d->complete_au) {
+        bs.DataFlag = MFX_BITSTREAM_COMPLETE_FRAME;
+    }
 
     mfxFrameSurface1 *surf = NULL;
     mfxFrameSurface1 *decoded = NULL;
@@ -426,15 +429,21 @@ static int surface_y(const mfxFrameSurface1 *decoded,
     return 0;
 }
 
-/* NV12 chroma for YOLO color path: prefer driver UV, else contiguous after luma. */
+/* NV12 chroma: separate-plane UV, else packed after luma (y_end). */
 static const uint8_t *surface_uv(const mfxFrameSurface1 *decoded, int pitch, int surf_h) {
-    if (decoded->Data.UV && decoded->Data.UV != decoded->Data.Y) {
-        return decoded->Data.UV;
-    }
-    if (!decoded->Data.Y || pitch <= 0 || surf_h <= 0) {
+    const uint8_t *y = decoded->Data.Y;
+    const uint8_t *uv = decoded->Data.UV;
+    if (!y || pitch <= 0 || surf_h <= 0) {
         return NULL;
     }
-    return decoded->Data.Y + (size_t)pitch * (size_t)surf_h;
+    const uint8_t *y_end = y + (size_t)pitch * (size_t)surf_h;
+    uintptr_t yu = (uintptr_t)y;
+    uintptr_t uvu = (uintptr_t)uv;
+    uintptr_t ye = (uintptr_t)y_end;
+    if (uv && uvu != yu && (uvu < yu || uvu >= ye)) {
+        return uv;
+    }
+    return y_end;
 }
 
 /* Pre-Imou simple surface read: Crop size + Pitch, driver UV (fallback contiguous). */
@@ -530,9 +539,28 @@ int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
     if (!d || !data || len == 0 || !y_out || !uv_out || !out_w || !out_h) {
         return -1;
     }
+    d->complete_au = 1;
+
+    int rc = ensure_decoder(d, data, len);
+    if (rc != 0) {
+        return rc;
+    }
+    int hw = d->dec_par.mfx.FrameInfo.CropW ? (int)d->dec_par.mfx.FrameInfo.CropW
+                                           : (int)d->dec_par.mfx.FrameInfo.Width;
+    int hh = d->dec_par.mfx.FrameInfo.CropH ? (int)d->dec_par.mfx.FrameInfo.CropH
+                                           : (int)d->dec_par.mfx.FrameInfo.Height;
+    if (hw > 0 && hh > 0) {
+        *out_w = hw;
+        *out_h = hh;
+        int yneed = hw * hh;
+        int uvneed = hw * ((hh + 1) / 2);
+        if (y_cap < yneed || uv_cap < uvneed) {
+            return -2;
+        }
+    }
 
     mfxFrameSurface1 *decoded = NULL;
-    int rc = decode_one_frame(d, data, len, &decoded);
+    rc = decode_one_frame(d, data, len, &decoded);
     if (rc != 0) {
         return rc;
     }
@@ -553,7 +581,7 @@ int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
     *out_w = w;
     *out_h = h;
     int yneed = w * h;
-    int uvneed = w * (h / 2);
+    int uvneed = w * ((h + 1) / 2);
     if (y_cap < yneed || uv_cap < uvneed) {
         decoded->FrameInterface->Unmap(decoded);
         decoded->FrameInterface->Release(decoded);
@@ -562,7 +590,7 @@ int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
     for (int row = 0; row < h; row++) {
         memcpy(y_out + (size_t)row * (size_t)w, y + (size_t)row * (size_t)pitch, (size_t)w);
     }
-    int uh = h / 2;
+    int uh = (h + 1) / 2;
     int surf_h = decoded->Info.Height > 0 ? (int)decoded->Info.Height : h;
     const uint8_t *uv_base = surface_uv(decoded, pitch, surf_h);
     if (uv_base && uh > 0) {

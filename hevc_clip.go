@@ -50,6 +50,26 @@ func segmentHasIDR(seg []byte) bool {
 	return found
 }
 
+func segmentHasIRAP(seg []byte) bool {
+	found := false
+	forEachNALU(seg, func(_ []byte, nalType int) {
+		if nalType >= 16 && nalType <= 21 {
+			found = true
+		}
+	})
+	return found
+}
+
+func lastIRAPIndex(segments [][]byte) int {
+	last := 0
+	for i, s := range segments {
+		if segmentHasIRAP(s) {
+			last = i
+		}
+	}
+	return last
+}
+
 func stripParameterSets(seg []byte) []byte {
 	var out bytes.Buffer
 	forEachNALU(seg, func(nal []byte, nalType int) {

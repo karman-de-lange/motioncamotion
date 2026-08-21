@@ -13,12 +13,31 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"time"
 	"unsafe"
 )
 
 type yoloConfig struct {
 	MainConf float64
+}
+
+// Small boxes (stump, stick) need higher conf than a full-height person.
+const smallDetH = inferSize / 8 // 80px on 640
+const smallDetConf = 0.65
+
+func filterDets(dets []DetBox, conf float64) []DetBox {
+	out := dets[:0]
+	for _, d := range dets {
+		h := d.Y2 - d.Y1
+		w := d.X2 - d.X1
+		if h <= 0 || w <= 0 || d.Score < conf {
+			continue
+		}
+		if h < float64(smallDetH) && d.Score < smallDetConf {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 var cocoNames = map[int]string{
@@ -142,15 +161,9 @@ func runYOLOWorker(ctx context.Context, adm *admissions, logQ chan<- string, sto
 	occ := newOccupancy()
 
 	for {
-		ev, opened, ok := adm.pull()
+		ev, opened, ok := adm.recv(ctx)
 		if !ok {
-			select {
-			case <-ctx.Done():
-				return
-			case <-adm.wake:
-			case <-time.After(200 * time.Millisecond):
-			}
-			continue
+			return
 		}
 		processDetect(ev, opened, logQ, store, inf, yc, occ)
 	}
@@ -186,6 +199,7 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 		logQ <- fmt.Sprintf("%s: infer error: %v", ev.Cam, err)
 		return
 	}
+	dets = filterDets(dets, yc.MainConf)
 	fresh := occ.consume(ev.Cam, dets, ev.At)
 	mainPass := len(fresh) > 0
 	topName := ""

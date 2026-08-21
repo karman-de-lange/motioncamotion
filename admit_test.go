@@ -1,48 +1,62 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
-type fakeCPU float64
-
-func (f fakeCPU) Percent() float64 { return float64(f) }
-
-func TestAdmit_latestOverwrite(t *testing.T) {
-	a := newAdmissions(fakeCPU(0))
-	a.mark("c1", DetectEvent{Cam: "c1", Label: "first"}, true)
-	a.mark("c1", DetectEvent{Cam: "c1", Label: "second"}, false)
+func TestAdmit_fifoQueue(t *testing.T) {
+	a := newAdmissions()
+	if !a.push(DetectEvent{Cam: "c1", Label: "first", SAD: 1}, true) {
+		t.Fatal("first")
+	}
+	if !a.push(DetectEvent{Cam: "c1", Label: "second", SAD: 2}, false) {
+		t.Fatal("second")
+	}
 	ev, opened, ok := a.pull()
-	if !ok {
-		t.Fatal("expected latest")
+	if !ok || ev.Label != "first" || !opened {
+		t.Fatalf("first job: ok=%v opened=%v %s", ok, opened, ev.Label)
 	}
-	if ev.Label != "second" {
-		t.Fatalf("want overwritten second, got %s", ev.Label)
-	}
-	if !opened {
-		t.Fatal("first look after open must survive overwrite")
+	ev, opened, ok = a.pull()
+	if !ok || ev.Label != "second" || opened {
+		t.Fatalf("second job: ok=%v opened=%v %s", ok, opened, ev.Label)
 	}
 	if _, _, ok := a.pull(); ok {
-		t.Fatal("only one latest per cam")
+		t.Fatal("queue should be empty")
 	}
 }
 
-func TestAdmit_cpuHighSkipsNonOpen(t *testing.T) {
-	a := newAdmissions(fakeCPU(99))
-	a.mark("c1", DetectEvent{Cam: "c1", Label: "open"}, true)
-	ev, opened, ok := a.pull()
-	if !ok || !opened || ev.Label != "open" {
-		t.Fatalf("open at high CPU: ok=%v opened=%v %s", ok, opened, ev.Label)
+func TestAdmit_skipWhenPerCamFull(t *testing.T) {
+	a := newAdmissions()
+	a.perCam = 2
+	if !a.push(DetectEvent{Cam: "c1", Label: "a"}, true) {
+		t.Fatal("a")
 	}
-	a.mark("c1", DetectEvent{Cam: "c1", Label: "hot"}, false)
-	if _, _, ok := a.pull(); ok {
-		t.Fatal("non-open pulled at 99% CPU")
+	if !a.push(DetectEvent{Cam: "c1", Label: "b"}, false) {
+		t.Fatal("b")
+	}
+	if a.push(DetectEvent{Cam: "c1", Label: "c"}, false) {
+		t.Fatal("same cam should skip when per-cam cap hit")
+	}
+	if !a.push(DetectEvent{Cam: "c2", Label: "other"}, true) {
+		t.Fatal("other cam should still enqueue")
+	}
+	ev, _, ok := a.pull()
+	if !ok || ev.Cam != "c1" || ev.Label != "a" {
+		t.Fatalf("want c1/a got %s/%s ok=%v", ev.Cam, ev.Label, ok)
+	}
+	if !a.push(DetectEvent{Cam: "c1", Label: "d"}, false) {
+		t.Fatal("after pull, c1 should have a free slot")
 	}
 }
 
-func TestAdmit_openNeverDroppedForCPU(t *testing.T) {
-	a := newAdmissions(fakeCPU(99))
-	a.mark("c1", DetectEvent{Cam: "c1", Label: "open"}, true)
-	ev, opened, ok := a.pull()
-	if !ok || !opened || ev.Cam != "c1" {
-		t.Fatalf("open dropped for CPU ok=%v opened=%v cam=%s", ok, opened, ev.Cam)
+func TestAdmit_recvCancel(t *testing.T) {
+	a := newAdmissions()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, _, ok := a.recv(ctx)
+	if ok {
+		t.Fatal("recv should fail on cancel")
 	}
 }

@@ -88,6 +88,80 @@ func compactness(blob, nChanged int) float64 {
 	return float64(blob) / float64(nChanged)
 }
 
+const (
+	noiseWin    = 48
+	noiseNeed   = 16
+	autoCompact = 0.25
+	wideBlobMin = 32
+)
+
+// quietBlob tracks this camera's typical noise blob (foliage, not people).
+type quietBlob struct {
+	v    [noiseWin]int
+	work [noiseWin]int
+	n, i int
+}
+
+func blobLooksQuiet(blob, nCh int) bool {
+	if blob < 16 {
+		return true
+	}
+	return nCh >= 16 && compactness(blob, nCh) < autoCompact
+}
+
+func (q *quietBlob) push(blob int) {
+	if blob < 0 {
+		return
+	}
+	q.v[q.i] = blob
+	q.i = (q.i + 1) % noiseWin
+	if q.n < noiseWin {
+		q.n++
+	}
+}
+
+func (q *quietBlob) ready() bool { return q.n >= noiseNeed }
+
+func (q *quietBlob) median() int {
+	if q.n < 1 {
+		return 0
+	}
+	copy(q.work[:q.n], q.v[:q.n])
+	sort.Ints(q.work[:q.n])
+	return q.work[q.n/2]
+}
+
+func (q *quietBlob) need(minBlob int) int {
+	n := q.median() * 2
+	if n < wideBlobMin {
+		n = wideBlobMin
+	}
+	if minBlob > n {
+		n = minBlob
+	}
+	return n
+}
+
+func motionHit(sad float64, blob, nCh, minBlob, needBlob int, minCompact float64) bool {
+	if blob < minBlob {
+		return false
+	}
+	needC := minCompact
+	if needC <= 0 {
+		needC = autoCompact
+	}
+	if nCh >= 16 && compactness(blob, nCh) < needC {
+		return false
+	}
+	if needBlob > 0 {
+		return blob >= needBlob
+	}
+	if sad >= 0 && blob >= wideBlobMin && compactness(blob, nCh) >= needC {
+		return true
+	}
+	return false
+}
+
 // maxBlob returns the largest 4-connected region of changed cells.
 func maxBlob(changed []bool, w, h int) int {
 	if len(changed) != w*h {

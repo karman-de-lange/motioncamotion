@@ -42,7 +42,7 @@ func NewFrameDecoder(codec int) (d FrameDecoder, rc int) {
 	return newFrameDecoder(codec)
 }
 
-// decodeRGBNearEnd feeds AUs in order and returns the last successfully decoded RGB.
+// decodeRGBNearEnd starts at the last IRAP and returns the last usable RGB.
 func decodeRGBNearEnd(segments [][]byte, outW, outH int) ([]byte, int, bool) {
 	dec, rc := NewFrameDecoder(CodecHEVC)
 	if rc != 0 || dec == nil {
@@ -53,12 +53,13 @@ func decodeRGBNearEnd(segments [][]byte, outW, outH int) ([]byte, int, bool) {
 }
 
 func decodeRGBNearEndWith(dec FrameDecoder, segments [][]byte, outW, outH int) ([]byte, int, bool) {
+	if start := lastIRAPIndex(segments); start > 0 {
+		segments = segments[start:]
+	}
 	rgb := make([]byte, outW*outH*3)
 	last := make([]byte, outW*outH*3)
-	best := make([]byte, outW*outH*3)
 	frames := 0
-	bestMean := -1
-	lastMean := -1
+	got := false
 	for _, seg := range segments {
 		if len(seg) == 0 {
 			continue
@@ -72,18 +73,10 @@ func decodeRGBNearEndWith(dec FrameDecoder, segments [][]byte, outW, outH int) (
 			continue
 		}
 		copy(last, rgb)
-		lastMean = m
-		if m > bestMean {
-			bestMean = m
-			copy(best, rgb)
-		}
+		got = true
 	}
-	if frames == 0 || bestMean < 0 {
-		return nil, 0, false
-	}
-	// Half-decoded P-frames are darker/sliced; keep last only if it is nearly as full as the best.
-	if lastMean < bestMean*7/10 {
-		return best, frames, true
+	if !got {
+		return nil, frames, false
 	}
 	return last, frames, true
 }
@@ -114,7 +107,32 @@ func rgbUsableMean(rgb []byte, mean int) bool {
 
 func rgbUsable(rgb []byte) bool { return rgbUsableMean(rgb, rgbCenterMean(rgb)) }
 
-func rgbChromaOK(rgb []byte) bool { return rgbUsable(rgb) }
+// rgbChromaPlausible is a test probe: U=V=0 green and UV-offset purple/magenta.
+func rgbChromaPlausible(rgb []byte) bool {
+	const w, h = inferSize, inferSize
+	if len(rgb) < w*h*3 {
+		return false
+	}
+	var n, greenish, magentish int
+	for y := h / 4; y < 3*h/4; y += 4 {
+		off := y * w * 3
+		for x := w / 8; x < 7*w/8; x += 8 {
+			i := off + x*3
+			r, g, b := int(rgb[i]), int(rgb[i+1]), int(rgb[i+2])
+			n++
+			if g > r+48 && g > b+48 {
+				greenish++
+			}
+			if r > g+48 && b > g+48 {
+				magentish++
+			}
+		}
+	}
+	if n == 0 {
+		return false
+	}
+	return greenish*5 < n*2 && magentish*5 < n*2
+}
 
 // decodeAUsToRGBFit feeds AUs into a fresh decoder → RGB fit (looksee).
 func decodeAUsToRGBFit(aus [][]byte, maxW, maxH, codec int) (rgb []byte, outW, outH int, err error) {

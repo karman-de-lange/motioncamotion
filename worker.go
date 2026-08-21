@@ -463,6 +463,12 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) boo
 	}
 	segments := w.ring.snapshot(snapshotDur)
 	if len(segments) == 0 {
+		segments = w.ring.snapshot(ringKeepDur)
+	}
+	if len(segments) == 0 {
+		if w.logQ != nil {
+			w.logQ <- fmt.Sprintf("%s: motion drop (no main AUs)", w.cfg.Name)
+		}
 		return false
 	}
 	ev := DetectEvent{
@@ -472,7 +478,9 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) boo
 		SAD:      sad,
 		Label:    label,
 	}
-	w.adm.mark(w.cfg.Name, ev, opened)
+	if w.adm != nil && !w.adm.push(ev, opened) {
+		return false
+	}
 	if w.logQ == nil {
 		return true
 	}

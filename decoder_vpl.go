@@ -88,7 +88,7 @@ func (v *vplDecoder) decodeNV12(au []byte) (y, uv []byte, pitch, w, h, rc int) {
 		return nil, nil, 0, 0, 0, rc
 	}
 	yn := w * h
-	uvn := w * (h / 2)
+	uvn := w * ((h + 1) / 2)
 	return v.y[:yn], v.uv[:uvn], w, w, h, 0
 }
 
@@ -122,6 +122,8 @@ func (v *vplDecoder) Close() {
 	}
 	C.vpl_decoder_free(v.dec)
 	v.dec = nil
+	v.y = nil
+	v.uv = nil
 }
 
 func uvPlaneDead(uv []byte, pitch, srcW, srcH int) bool {

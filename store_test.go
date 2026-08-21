@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -154,6 +156,113 @@ func TestEventStore_pruneSizePrefersMotion(t *testing.T) {
 	}
 	if _, err := os.Stat(al); err != nil {
 		t.Fatal("alert still should survive size prune")
+	}
+}
+
+func writeJSONL(t *testing.T, root string, recs []EventRecord) {
+	t.Helper()
+	path := filepath.Join(root, "events.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	for _, rec := range recs {
+		b, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write(append(b, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestEventStore_ListPageReadsPastRecent(t *testing.T) {
+	root := t.TempDir()
+	oldAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	newAt := time.Date(2026, 8, 20, 18, 0, 0, 0, time.UTC)
+	recs := []EventRecord{
+		{ID: "old-alert", Type: "alert", Cam: "hik2", At: oldAt, MainClass: "person", Dets: []DetBox{{Class: "person", Score: 0.9}}},
+	}
+	base := oldAt.Add(time.Hour)
+	for i := 0; i < 2500; i++ {
+		recs = append(recs, EventRecord{
+			ID:   fmt.Sprintf("m%d", i),
+			Type: "motion",
+			Cam:  "cam118",
+			At:   base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	recs = append(recs, EventRecord{
+		ID:        "new-alert",
+		Type:      "alert",
+		Cam:       "hik1",
+		At:        newAt,
+		MainClass: "car",
+		Dets:      []DetBox{{Class: "car", Score: 0.8}, {Class: "person", Score: 0.7}},
+	})
+	writeJSONL(t, root, recs)
+
+	s, err := newEventStore(root, 7, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(s.List(500, "alert")); n != 1 || s.List(500, "alert")[0].ID != "new-alert" {
+		t.Fatalf("RAM list should only see the newest alert, got %+v", s.List(500, "alert"))
+	}
+
+	page := s.queryEvents(eventQuery{Type: "alert", Limit: 100})
+	if page.Total != 2 || len(page.Events) != 2 || page.HasMore {
+		t.Fatalf("full alert page: %+v", page)
+	}
+	if page.Events[0].ID != "new-alert" || page.Events[1].ID != "old-alert" {
+		t.Fatalf("newest first: %#v %#v", page.Events[0].ID, page.Events[1].ID)
+	}
+
+	first := s.queryEvents(eventQuery{Type: "alert", Limit: 1})
+	if len(first.Events) != 1 || first.Events[0].ID != "new-alert" || !first.HasMore || first.Total != 2 {
+		t.Fatalf("first page: %+v", first)
+	}
+	older := s.ListPage(1, "alert", first.Events[0].At)
+	if len(older) != 1 || older[0].ID != "old-alert" {
+		t.Fatalf("before cursor: %+v", older)
+	}
+
+	hik2 := s.queryEvents(eventQuery{Type: "alert", Cam: "hik2", Limit: 10})
+	if hik2.Total != 1 || hik2.Events[0].ID != "old-alert" {
+		t.Fatalf("cam filter: %+v", hik2)
+	}
+	cars := s.queryEvents(eventQuery{Type: "alert", Class: "car", Limit: 10})
+	if cars.Total != 1 || cars.Events[0].ID != "new-alert" {
+		t.Fatalf("class filter: %+v", cars)
+	}
+	person := s.queryEvents(eventQuery{Type: "alert", Class: "person", Limit: 10})
+	if person.Total != 2 {
+		t.Fatalf("person matches main or dets: %+v", person)
+	}
+	since := s.queryEvents(eventQuery{Type: "alert", Since: newAt.Add(-time.Minute), Limit: 10})
+	if since.Total != 1 || since.Events[0].ID != "new-alert" {
+		t.Fatalf("since filter: %+v", since)
+	}
+	until := s.queryEvents(eventQuery{Type: "alert", Until: newAt, Limit: 10})
+	if until.Total != 1 || until.Events[0].ID != "old-alert" {
+		t.Fatalf("until exclusive: %+v", until)
+	}
+}
+
+func TestParseQueryTime(t *testing.T) {
+	if !parseQueryTime("").IsZero() {
+		t.Fatal("empty")
+	}
+	got := parseQueryTime("2026-08-19T18:00:00.123456789Z")
+	want := time.Date(2026, 8, 19, 18, 0, 0, 123456789, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("nano %v", got)
+	}
+	d := parseQueryTime("2026-08-19")
+	if !d.Equal(time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("date %v", d)
 	}
 }
 

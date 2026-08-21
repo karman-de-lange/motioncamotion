@@ -97,6 +97,42 @@ func motionGate(sad float64, blob, streak, sustain int, sadCutoff float64, minBl
 	return true
 }
 
+func TestQuietBlob_needAboveMedian(t *testing.T) {
+	var q quietBlob
+	for i := 0; i < noiseNeed; i++ {
+		q.push(10)
+	}
+	if !q.ready() || q.median() != 10 {
+		t.Fatalf("ready=%v med=%d", q.ready(), q.median())
+	}
+	need := q.need(3)
+	if need < 24 {
+		t.Fatalf("need %d want at least 32-cap 24", need)
+	}
+	// compact person 80 vs quiet 10
+	if !motionHit(0, 80, 80, 3, need, 0) {
+		t.Fatal("person blob should beat quiet median")
+	}
+	if motionHit(0, 12, 12, 3, need, 0) {
+		t.Fatal("noise blob should stay under need")
+	}
+}
+
+func TestMotionHit_wideShotPerson(t *testing.T) {
+	if !motionHit(0.78, 128, 128, 3, 0, 0) {
+		t.Fatal("compact wide-shot person should fire before baseline is ready")
+	}
+	if motionHit(0.78, 8, 8, 3, 0, 0) {
+		t.Fatal("tiny blob should not fire on bootstrap path")
+	}
+	if motionHit(1.2, 40, 200, 3, 32, 0.35) {
+		t.Fatal("diffuse foliage should fail compactness")
+	}
+	if !motionHit(1.2, 40, 45, 3, 32, 0.35) {
+		t.Fatal("compact person should fire")
+	}
+}
+
 func TestMotionGate_live161Defaults(t *testing.T) {
 	// cameras_live161.json values after main.go conversion
 	const (

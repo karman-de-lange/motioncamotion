@@ -248,8 +248,7 @@ func main() {
 	defer cancel()
 
 	logQ := make(chan string, 256)
-	cpu := &cpuSampler{}
-	adm := newAdmissions(cpu)
+	adm := newAdmissions()
 
 	store, err := newEventStore(cfg.MediaDir, cfg.MediaMaxAgeDays, cfg.MediaMaxMB)
 	if err != nil {

@@ -60,21 +60,28 @@ func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, sto
 
 	mux.HandleFunc("/api/events", func(rw http.ResponseWriter, r *http.Request) {
 		if store == nil {
-			writeJSON(rw, []EventRecord{})
+			writeJSON(rw, eventPage{Events: []EventRecord{}})
 			return
 		}
-		typ := r.URL.Query().Get("type")
-		limit := 200
-		if typ == "alert" {
-			limit = 200
-		}
+		limit := 100
 		if q := r.URL.Query().Get("limit"); q != "" {
-			if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= 2000 {
+			if n, err := strconv.Atoi(q); err == nil && n > 0 {
+				if n > 500 {
+					n = 500
+				}
 				limit = n
 			}
 		}
-		list := store.List(limit, typ)
-		writeJSON(rw, list)
+		page := store.queryEvents(eventQuery{
+			Type:   r.URL.Query().Get("type"),
+			Cam:    r.URL.Query().Get("cam"),
+			Class:  r.URL.Query().Get("class"),
+			Before: parseQueryTime(r.URL.Query().Get("before")),
+			Since:  parseQueryTime(r.URL.Query().Get("since")),
+			Until:  parseQueryTime(r.URL.Query().Get("until")),
+			Limit:  limit,
+		})
+		writeJSON(rw, page)
 	})
 
 	mux.HandleFunc("/api/events/stream", func(rw http.ResponseWriter, r *http.Request) {
@@ -255,6 +262,35 @@ func writeJSON(rw http.ResponseWriter, v interface{}) {
 	_ = enc.Encode(v)
 }
 
+func parseQueryTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
+func cameraNamesJSON(workers []*CameraWorker) string {
+	names := make([]string, 0, len(workers))
+	for _, w := range workers {
+		names = append(names, w.Name())
+	}
+	b, err := json.Marshal(names)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
 func webIndexHTML(workers []*CameraWorker) string {
 	var b strings.Builder
 	b.WriteString(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
@@ -323,7 +359,7 @@ nav button.active{background:var(--acc2);color:#fff;box-shadow:0 1px 0 rgba(255,
   .split-detail{position:static!important;max-height:none!important}
 }
 .split-list{min-width:0;display:flex;flex-direction:column;min-height:0}
-.split-list .table-wrap{flex:1;max-height:calc(100vh - 180px);overflow:auto}
+.split-list .table-wrap{flex:1;max-height:calc(100vh - 250px);overflow:auto}
 .split-detail{
   position:sticky;top:78px;align-self:start;
   background:var(--card);border:1px solid var(--bd);border-radius:var(--radius);
@@ -384,6 +420,16 @@ tbody tr.selected{background:rgba(91,159,212,.14)}
 .detlist ul{margin:8px 0;padding-left:1.1rem;color:var(--tx)}
 .detlist li{margin:4px 0}
 .empty{color:var(--mut);padding:28px;text-align:center;border:1px dashed var(--bd);border-radius:var(--radius)}
+.filters{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:end;margin:0 0 12px}
+.filters label{display:flex;flex-direction:column;gap:4px;font-size:.68rem;color:var(--mut);font-weight:650;text-transform:uppercase;letter-spacing:.05em}
+.filters select,.filters input[type="date"]{
+  background:var(--surface);border:1px solid var(--bd);color:var(--tx);
+  padding:6px 8px;border-radius:8px;font:inherit;font-size:.84rem;min-width:8.5rem
+}
+.filters .filter-count{color:var(--mut);font-size:.82rem;align-self:center;text-transform:none;letter-spacing:0;font-weight:500;margin-left:4px}
+.thumb{width:88px;height:50px;object-fit:cover;border-radius:4px;background:#000;display:block;border:1px solid var(--bd)}
+.thumb-empty{width:88px;height:50px;border-radius:4px;border:1px dashed var(--bd);background:var(--surface);color:var(--mut);display:flex;align-items:center;justify-content:center;font-size:.68rem}
+.more-wrap{padding:12px;text-align:center;border-top:1px solid var(--bd)}
 .mono{font-family:var(--mono);font-size:.8rem}
 .card-recent{margin:0;padding:6px 12px 10px;list-style:none;font-size:.72rem;color:var(--mut);border-top:1px solid var(--bd);min-height:3.2em}
 .card-recent li{display:flex;justify-content:space-between;gap:8px;padding:2px 0;cursor:pointer}
@@ -437,16 +483,22 @@ tbody tr.selected{background:rgba(91,159,212,.14)}
 	}
 	b.WriteString(`</div></div>
 <div id="tab-alerts" class="panel">
-  <p class="panel-lead">YOLO-pass events with bounding boxes for every object above confidence. Click a row to preview.</p>
+  <p class="panel-lead">All YOLO-pass alerts on disk. Filter by camera, date, or class. Load older to keep paging back.</p>
   <div class="split">
-    <div class="split-list" id="alerts-list"></div>
+    <div class="split-list">
+      <div id="alerts-filters"></div>
+      <div id="alerts-list"></div>
+    </div>
     <div class="split-detail" id="alert-detail"><div class="placeholder">Select an alert to view the annotated frame.</div></div>
   </div>
 </div>
 <div id="tab-motion" class="panel">
-  <p class="panel-lead">Last motion triggers (including YOLO rejects). Survives restart. Click a row to preview.</p>
+  <p class="panel-lead">All motion triggers on disk (including YOLO rejects). Filter by camera or date. Load older to keep paging back.</p>
   <div class="split">
-    <div class="split-list" id="motion-list"></div>
+    <div class="split-list">
+      <div id="motion-filters"></div>
+      <div id="motion-list"></div>
+    </div>
     <div class="split-detail" id="motion-detail"><div class="placeholder">Select a motion event to view the snapshot.</div></div>
   </div>
 </div>
@@ -460,6 +512,7 @@ tbody tr.selected{background:rgba(91,159,212,.14)}
 </div>
 <div class="toast" id="toast"></div>
 <script>
+var CAMS=` + cameraNamesJSON(workers) + `;
 ` + webAppJS + `
 </script></body></html>`)
 	return b.String()
@@ -502,8 +555,6 @@ const webAppJS = `
       document.querySelectorAll('.panel').forEach(function(p){ p.classList.remove('active'); });
       btn.classList.add('active');
       document.getElementById('tab-'+btn.getAttribute('data-tab')).classList.add('active');
-      if(btn.getAttribute('data-tab')==='alerts') loadEvents('alert','alerts-list','alert-detail');
-      if(btn.getAttribute('data-tab')==='motion') loadEvents('motion','motion-list','motion-detail');
       if(btn.getAttribute('data-tab')==='settings') loadSettings();
     });
   });
@@ -518,35 +569,172 @@ const webAppJS = `
     }catch(e){ return iso; }
   }
 
-  function loadEvents(type, listId, detailId){
-    fetch('/api/events?type='+encodeURIComponent(type)+'&t='+Date.now()).then(function(r){return r.json();}).then(function(rows){
-      var el=document.getElementById(listId);
-      if(!rows || !rows.length){ el.innerHTML='<div class="empty">No events yet.</div>'; return; }
-      var h='<div class="table-wrap"><table><thead><tr><th>When</th><th>Camera</th><th>Type</th><th>Details</th></tr></thead><tbody>';
-      rows.forEach(function(e){
-        var info = e.type==='alert'
-          ? (e.dets||[]).map(function(d){return d.class+' '+d.score.toFixed(2);}).join(', ')
-          : (e.still ? 'Still + clip' : 'Clip');
-        var typeLabel = e.type==='alert' ? 'Alert' : 'Motion';
-        h+='<tr data-id="'+esc(e.id)+'">'
-          +'<td class="mono">'+esc(fmtWhen(e.at))+'</td><td>'+esc(e.cam)+'</td>'
-          +'<td><span class="badge '+esc(e.type)+'">'+esc(typeLabel)+'</span> <span style="color:var(--mut)">'+esc(e.label||'')+'</span></td>'
-          +'<td>'+esc(info)+'</td></tr>';
-      });
-      h+='</tbody></table></div>';
-      el.innerHTML=h;
-      el.querySelectorAll('tr[data-id]').forEach(function(tr){
-        tr.addEventListener('click', function(){
-          el.querySelectorAll('tr').forEach(function(x){ x.classList.remove('selected'); });
-          tr.classList.add('selected');
-          var id=tr.getAttribute('data-id');
-          var e=rows.find(function(x){return x.id===id;});
-          showDetail(e, detailId);
-        });
-      });
-    }).catch(function(err){
-      document.getElementById(listId).innerHTML='<div class="empty">Load failed: '+esc(err)+'</div>';
+  var PAGE=50;
+  var CLASSES=['person','car','truck','bus','cat','dog','bird'];
+  var TABS={
+    alert:{listId:'alerts-list',detailId:'alert-detail',filterId:'alerts-filters',rows:[],total:0,hasMore:false,selected:null,loading:false},
+    motion:{listId:'motion-list',detailId:'motion-detail',filterId:'motion-filters',rows:[],total:0,hasMore:false,selected:null,loading:false}
+  };
+
+  function pageRows(data){
+    if(!data) return [];
+    if(Array.isArray(data)) return data;
+    return data.events||[];
+  }
+
+  function isoSince(d){
+    if(!d) return '';
+    return new Date(d+'T00:00:00').toISOString();
+  }
+  function isoUntil(d){
+    if(!d) return '';
+    var dt=new Date(d+'T00:00:00');
+    dt.setDate(dt.getDate()+1);
+    return dt.toISOString();
+  }
+
+  function readFilters(type){
+    var root=document.getElementById(TABS[type].filterId);
+    var val=function(f){ var n=root.querySelector('[data-f="'+f+'"]'); return n?n.value:''; };
+    var since=val('since'), until=val('until');
+    return {cam:val('cam'), class:val('class'), since:isoSince(since), until:isoUntil(until)};
+  }
+
+  function hasActiveFilters(f){
+    return !!(f.cam||f.class||f.since||f.until);
+  }
+
+  function eventMatches(e, type, f){
+    if(!e || e.type!==type) return false;
+    if(f.cam && e.cam!==f.cam) return false;
+    if(f.class){
+      var want=f.class.toLowerCase();
+      var ok=((e.main_class||'').toLowerCase()===want);
+      (e.dets||[]).forEach(function(d){ if((d.class||'').toLowerCase()===want) ok=true; });
+      if(!ok) return false;
+    }
+    if(f.since && new Date(e.at)<new Date(f.since)) return false;
+    if(f.until && new Date(e.at)>=new Date(f.until)) return false;
+    return true;
+  }
+
+  function filterBarHTML(type){
+    var cams=CAMS||[];
+    var camOpts='<option value="">All cameras</option>'+cams.map(function(c){return '<option value="'+esc(c)+'">'+esc(c)+'</option>';}).join('');
+    var h='<div class="filters" data-filters="'+type+'">'
+      +'<label>Camera <select data-f="cam">'+camOpts+'</select></label>'
+      +'<label>From <input type="date" data-f="since"></label>'
+      +'<label>To <input type="date" data-f="until"></label>';
+    if(type==='alert'){
+      h+='<label>Class <select data-f="class"><option value="">Any class</option>'
+        +CLASSES.map(function(c){return '<option value="'+c+'">'+c+'</option>';}).join('')
+        +'</select></label>';
+    }
+    h+='<button type="button" class="btn" data-apply="'+type+'">Filter</button>'
+      +'<button type="button" class="btn" data-reset="'+type+'">Reset</button>'
+      +'<span class="filter-count" data-count="'+type+'"></span></div>';
+    return h;
+  }
+
+  function bindFilters(type){
+    var root=document.getElementById(TABS[type].filterId);
+    root.innerHTML=filterBarHTML(type);
+    root.querySelector('[data-apply="'+type+'"]').addEventListener('click', function(){ loadEvents(type, true); });
+    root.querySelector('[data-reset="'+type+'"]').addEventListener('click', function(){
+      root.querySelectorAll('select,input').forEach(function(n){ n.value=''; });
+      loadEvents(type, true);
     });
+    root.querySelectorAll('select,input').forEach(function(n){
+      n.addEventListener('change', function(){ loadEvents(type, true); });
+    });
+  }
+
+  function eventQuery(type, extra){
+    var f=readFilters(type);
+    var q='/api/events?type='+encodeURIComponent(type)+'&limit='+PAGE+'&t='+Date.now();
+    if(f.cam) q+='&cam='+encodeURIComponent(f.cam);
+    if(f.class) q+='&class='+encodeURIComponent(f.class);
+    if(f.since) q+='&since='+encodeURIComponent(f.since);
+    if(f.until) q+='&until='+encodeURIComponent(f.until);
+    if(extra && extra.before) q+='&before='+encodeURIComponent(extra.before);
+    return q;
+  }
+
+  function loadEvents(type, reset){
+    var st=TABS[type];
+    if(!st || st.loading) return;
+    if(reset){ st.rows=[]; st.hasMore=false; st.total=0; }
+    var extra={};
+    if(!reset && st.rows.length) extra.before=st.rows[st.rows.length-1].at;
+    st.loading=true;
+    fetch(eventQuery(type, extra)).then(function(r){return r.json();}).then(function(data){
+      var rows=pageRows(data);
+      var seen={};
+      st.rows.forEach(function(e){ seen[e.id]=true; });
+      rows.forEach(function(e){ if(e && e.id && !seen[e.id]){ st.rows.push(e); seen[e.id]=true; } });
+      st.total=typeof data.total==='number' ? data.total : st.rows.length;
+      st.hasMore=!!data.has_more;
+      renderEventList(type);
+    }).catch(function(err){
+      document.getElementById(st.listId).innerHTML='<div class="empty">Load failed: '+esc(err)+'</div>';
+    }).then(function(){ st.loading=false; });
+  }
+
+  function prependEvent(e){
+    var st=TABS[e.type];
+    if(!st) return;
+    var f=readFilters(e.type);
+    if(!eventMatches(e, e.type, f)) return;
+    for(var i=0;i<st.rows.length;i++) if(st.rows[i].id===e.id) return;
+    st.rows.unshift(e);
+    st.total+=1;
+    renderEventList(e.type);
+  }
+
+  function renderEventList(type){
+    var st=TABS[type];
+    var el=document.getElementById(st.listId);
+    var count=document.querySelector('[data-count="'+type+'"]');
+    var noun=type==='alert'?'alert':'motion';
+    if(count){
+      var shown=st.rows.length;
+      count.textContent=st.total?(shown+' of '+st.total+' '+noun+(st.total===1?'':'s')):(shown?shown+' '+noun+(shown===1?'':'s'):'');
+    }
+    if(!st.rows.length){
+      var msg=hasActiveFilters(readFilters(type))?'No events match these filters.':'No events yet.';
+      el.innerHTML='<div class="empty">'+msg+'</div>';
+      return;
+    }
+    var h='<div class="table-wrap"><table><thead><tr><th></th><th>When</th><th>Camera</th><th>Type</th><th>Details</th></tr></thead><tbody>';
+    st.rows.forEach(function(e){
+      var info = e.type==='alert'
+        ? (e.dets||[]).map(function(d){return d.class+' '+d.score.toFixed(2);}).join(', ')
+        : (e.still ? 'Still + clip' : 'Clip');
+      var typeLabel = e.type==='alert' ? 'Alert' : 'Motion';
+      var thumb=e.still
+        ? '<img class="thumb" src="/media/'+esc(e.still)+'" alt="" loading="lazy">'
+        : '<div class="thumb-empty">—</div>';
+      h+='<tr data-id="'+esc(e.id)+'"'+(st.selected===e.id?' class="selected"':'')+'>'
+        +'<td>'+thumb+'</td>'
+        +'<td class="mono">'+esc(fmtWhen(e.at))+'</td><td>'+esc(e.cam)+'</td>'
+        +'<td><span class="badge '+esc(e.type)+'">'+esc(typeLabel)+'</span> <span style="color:var(--mut)">'+esc(e.label||'')+'</span></td>'
+        +'<td>'+esc(info)+'</td></tr>';
+    });
+    h+='</tbody></table>';
+    if(st.hasMore) h+='<div class="more-wrap"><button type="button" class="btn" data-more="'+type+'">Load older</button></div>';
+    h+='</div>';
+    el.innerHTML=h;
+    el.querySelectorAll('tr[data-id]').forEach(function(tr){
+      tr.addEventListener('click', function(){
+        el.querySelectorAll('tr').forEach(function(x){ x.classList.remove('selected'); });
+        tr.classList.add('selected');
+        st.selected=tr.getAttribute('data-id');
+        var e=st.rows.find(function(x){return x.id===st.selected;});
+        showDetail(e, st.detailId);
+      });
+    });
+    var more=el.querySelector('[data-more="'+type+'"]');
+    if(more) more.addEventListener('click', function(){ loadEvents(type, false); });
   }
 
   function showDetail(e, detailId){
@@ -596,6 +784,7 @@ const webAppJS = `
       try{
         var e=JSON.parse(ev.data);
         refreshLiveRecent();
+        prependEvent(e);
         if(e.type==='alert'){
           banner.textContent='Alert · '+e.cam+' · '+(e.main_class||'object')+' '+(e.main_score||0).toFixed(2);
           banner.classList.add('show');
@@ -607,11 +796,6 @@ const webAppJS = `
           if(window.Notification && Notification.permission==='granted'){
             new Notification('Motion CAMotion · '+e.cam, { body: (e.main_class||'object')+' '+(e.main_score||0).toFixed(2) });
           }
-          if(document.getElementById('tab-alerts').classList.contains('active'))
-            loadEvents('alert','alerts-list','alert-detail');
-        } else if(e.type==='motion'){
-          if(document.getElementById('tab-motion').classList.contains('active'))
-            loadEvents('motion','motion-list','motion-detail');
         }
       }catch(err){}
     });
@@ -624,8 +808,10 @@ const webAppJS = `
     };
   }
   connectSSE();
-  loadEvents('alert','alerts-list','alert-detail');
-  loadEvents('motion','motion-list','motion-detail');
+  bindFilters('alert');
+  bindFilters('motion');
+  loadEvents('alert', true);
+  loadEvents('motion', true);
   refreshLiveRecent();
 
   function refreshLiveRecent(){
@@ -639,8 +825,8 @@ const webAppJS = `
         if(!by[e.cam]) by[e.cam]=[];
         if(by[e.cam].length<3) by[e.cam].push(e);
       }
-      (arr[0]||[]).forEach(add);
-      (arr[1]||[]).forEach(add);
+      pageRows(arr[0]).forEach(add);
+      pageRows(arr[1]).forEach(add);
       document.querySelectorAll('[data-recent]').forEach(function(ul){
         var cam=ul.getAttribute('data-recent');
         var list=by[cam]||[];

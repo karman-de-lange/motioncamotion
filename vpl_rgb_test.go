@@ -2,7 +2,12 @@
 
 package main
 
-import "testing"
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"testing"
+)
 
 func pix(rgb []byte, w, x, y int) (r, g, b byte) {
 	i := (y*w + x) * 3
@@ -263,4 +268,243 @@ func TestUVPlaneDead(t *testing.T) {
 	if uvPlaneDead(uv, 16, 8, 8) {
 		t.Fatal("chroma-like crop samples should be live")
 	}
+}
+
+func annexBAccessUnits(data []byte) [][]byte {
+	var aus [][]byte
+	var prefix []byte
+	forEachNALU(data, func(nal []byte, nalType int) {
+		if nalType <= 31 {
+			au := make([]byte, 0, len(prefix)+len(nal))
+			au = append(au, prefix...)
+			au = append(au, nal...)
+			aus = append(aus, au)
+			prefix = nil
+		} else {
+			prefix = append(prefix, nal...)
+		}
+	})
+	return aus
+}
+
+func hevcParamPrefix(data []byte) []byte {
+	var out []byte
+	seen := [3]bool{}
+	forEachNALU(data, func(nal []byte, nalType int) {
+		i := nalType - 32
+		if i < 0 || i > 2 || seen[i] {
+			return
+		}
+		seen[i] = true
+		out = append(out, nal...)
+	})
+	return out
+}
+
+func hevcGOPAUs(data []byte, fromLastIRAP bool) [][]byte {
+	aus := annexBAccessUnits(data)
+	if len(aus) == 0 {
+		return aus
+	}
+	start := 0
+	if fromLastIRAP {
+		start = lastIRAPIndex(aus)
+	} else {
+		for i, au := range aus {
+			if segmentHasIRAP(au) {
+				start = i
+				break
+			}
+		}
+	}
+	aus = aus[start:]
+	if len(aus) == 0 {
+		return aus
+	}
+	hasVPS := false
+	forEachNALU(aus[0], func(_ []byte, nalType int) {
+		if nalType == 32 {
+			hasVPS = true
+		}
+	})
+	if !hasVPS {
+		if ps := hevcParamPrefix(data); len(ps) > 0 {
+			head := append([]byte{}, ps...)
+			aus[0] = append(head, aus[0]...)
+		}
+	}
+	return aus
+}
+
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func rgbHasLiveChroma(rgb []byte) bool {
+	const w, h = inferSize, inferSize
+	if len(rgb) < w*h*3 {
+		return false
+	}
+	maxd := 0
+	for y := h / 4; y < 3*h/4; y += 4 {
+		off := y * w * 3
+		for x := w / 8; x < 7*w/8; x += 8 {
+			i := off + x*3
+			r, g, b := int(rgb[i]), int(rgb[i+1]), int(rgb[i+2])
+			d := absInt(r - g)
+			if v := absInt(g - b); v > d {
+				d = v
+			}
+			if v := absInt(r - b); v > d {
+				d = v
+			}
+			if d > maxd {
+				maxd = d
+			}
+		}
+	}
+	return maxd > 0
+}
+
+func assertLetterboxPad(t *testing.T, rgb []byte, w, h int) {
+	t.Helper()
+	if len(rgb) < w*h*3 {
+		t.Fatalf("rgb len %d", len(rgb))
+	}
+	for _, y := range []int{0, h - 1} {
+		for x := 0; x < w; x++ {
+			i := (y*w + x) * 3
+			if rgb[i] != 114 || rgb[i+1] != 114 || rgb[i+2] != 114 {
+				t.Fatalf("pad row %d x=%d want 114 got %d,%d,%d", y, x, rgb[i], rgb[i+1], rgb[i+2])
+			}
+		}
+	}
+	cy := h / 2
+	saw := false
+	for x := 0; x < w; x++ {
+		i := (cy*w + x) * 3
+		if rgb[i] != 114 || rgb[i+1] != 114 || rgb[i+2] != 114 {
+			saw = true
+			break
+		}
+	}
+	if !saw {
+		t.Fatal("content row is pad 114 (stretch-fill?)")
+	}
+}
+
+func assertInferRGB(t *testing.T, rgb []byte, what string) {
+	t.Helper()
+	if !rgbChromaPlausible(rgb) {
+		t.Fatalf("%s green/purple", what)
+	}
+	if !rgbUsable(rgb) {
+		t.Fatalf("%s unusable", what)
+	}
+	if !rgbHasLiveChroma(rgb) {
+		t.Fatalf("%s grayscale (lost UV)", what)
+	}
+	assertLetterboxPad(t, rgb, inferSize, inferSize)
+}
+
+func decodeClipRGB(t *testing.T, dec FrameDecoder, aus [][]byte) (n int, first, last []byte) {
+	t.Helper()
+	buf := make([]byte, inferSize*inferSize*3)
+	for i, au := range aus {
+		if len(au) == 0 {
+			continue
+		}
+		if dec.RGB(au, buf, inferSize, inferSize) != DecOK {
+			continue
+		}
+		n++
+		assertInferRGB(t, buf, fmt.Sprintf("frame %d", i))
+		if first == nil {
+			first = append([]byte{}, buf...)
+		}
+		last = append([]byte{}, buf...)
+	}
+	return n, first, last
+}
+
+func TestVPLRGB_hevcPFramesNotGreen(t *testing.T) {
+	data, err := os.ReadFile("clips/hik1_20260611_224034.h265")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aus := hevcGOPAUs(data, false)
+	if len(aus) < 3 {
+		t.Fatalf("need several AUs, got %d", len(aus))
+	}
+	dec, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || dec == nil {
+		t.Fatalf("decoder new %d", rc)
+	}
+	v := dec.(*vplDecoder)
+	defer dec.Close()
+
+	n, first, last := decodeClipRGB(t, dec, aus)
+	if n < len(aus)*3/4 {
+		t.Fatalf("pictures=%d aus=%d (COMPLETE_FRAME missing?)", n, len(aus))
+	}
+	if first == nil || last == nil {
+		t.Fatal("need IDR and P")
+	}
+	fm, lm := rgbCenterMean(first), rgbCenterMean(last)
+	if lm < fm*7/10 {
+		t.Fatalf("P-frame mean %d collapsed vs IDR %d", lm, fm)
+	}
+	dec.Close()
+	if v.y != nil || v.uv != nil || v.dec != nil {
+		t.Fatal("Close left session planes")
+	}
+}
+
+func TestVPLRGB_decodeRGBNearEndNotGreen(t *testing.T) {
+	data, err := os.ReadFile("clips/hik1_20260611_224034.h265")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aus := hevcGOPAUs(data, true)
+	if len(aus) < 2 {
+		t.Fatalf("last GOP too short: %d AUs", len(aus))
+	}
+	raw, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || raw == nil {
+		t.Fatalf("decoder new %d", rc)
+	}
+	rawN, first, lastP := decodeClipRGB(t, raw, aus)
+	raw.Close()
+	if rawN < 2 {
+		t.Fatal("need IRAP and P in last GOP")
+	}
+	if rawN < len(aus)*3/4 {
+		t.Fatalf("last GOP pictures=%d aus=%d", rawN, len(aus))
+	}
+	if bytes.Equal(first, lastP) {
+		t.Fatal("last P-frame identical to IRAP")
+	}
+
+	dec, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || dec == nil {
+		t.Fatalf("decoder new %d", rc)
+	}
+	defer dec.Close()
+	rgb, frames, ok := decodeRGBNearEndWith(dec, aus, inferSize, inferSize)
+	if !ok {
+		t.Fatalf("ok=%v frames=%d", ok, frames)
+	}
+	if frames != rawN {
+		t.Fatalf("picker frames=%d independent=%d", frames, rawN)
+	}
+	if bytes.Equal(rgb, first) && !bytes.Equal(rgb, lastP) {
+		t.Fatal("picker kept IRAP, not last P-frame")
+	}
+	if !bytes.Equal(rgb, lastP) {
+		t.Fatal("picker output != last P-frame")
+	}
+	assertInferRGB(t, rgb, "near-end")
 }

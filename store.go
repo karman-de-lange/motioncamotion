@@ -169,6 +169,106 @@ func (s *EventStore) List(limit int, typ string) []EventRecord {
 	return out
 }
 
+// eventQuery filters a jsonl scan. Before is a newest-first cursor (strictly older).
+// Since is inclusive; Until is exclusive.
+type eventQuery struct {
+	Type   string
+	Cam    string
+	Class  string
+	Before time.Time
+	Since  time.Time
+	Until  time.Time
+	Limit  int
+}
+
+type eventPage struct {
+	Events  []EventRecord `json:"events"`
+	Total   int           `json:"total"`
+	HasMore bool          `json:"has_more"`
+}
+
+func eventMatches(r EventRecord, q eventQuery) bool {
+	if q.Type != "" && r.Type != q.Type {
+		return false
+	}
+	if q.Cam != "" && r.Cam != q.Cam {
+		return false
+	}
+	if !q.Since.IsZero() && r.At.Before(q.Since) {
+		return false
+	}
+	if !q.Until.IsZero() && !r.At.Before(q.Until) {
+		return false
+	}
+	if q.Class != "" {
+		want := strings.ToLower(q.Class)
+		ok := strings.ToLower(r.MainClass) == want
+		if !ok {
+			for _, d := range r.Dets {
+				if strings.ToLower(d.Class) == want {
+					ok = true
+					break
+				}
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// ListPage newest-first page from events.jsonl (not the RAM recent window).
+// Shares s.mu with prune/rewriteIndexExisting so a rewrite cannot tear the scan.
+func (s *EventStore) ListPage(limit int, typ string, before time.Time) []EventRecord {
+	return s.queryEvents(eventQuery{Limit: limit, Type: typ, Before: before}).Events
+}
+
+func (s *EventStore) queryEvents(q eventQuery) eventPage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if q.Limit <= 0 {
+		q.Limit = 100
+	}
+	page := eventPage{Events: []EventRecord{}}
+	f, err := os.Open(s.index)
+	if err != nil {
+		return page
+	}
+	defer f.Close()
+	var matched []EventRecord
+	sc := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	sc.Buffer(buf, 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec EventRecord
+		if json.Unmarshal(line, &rec) != nil {
+			continue
+		}
+		if !eventMatches(rec, q) {
+			continue
+		}
+		matched = append(matched, rec)
+	}
+	page.Total = len(matched)
+	for i := len(matched) - 1; i >= 0; i-- {
+		r := matched[i]
+		if !q.Before.IsZero() && !r.At.Before(q.Before) {
+			continue
+		}
+		if len(page.Events) == q.Limit {
+			page.HasMore = true
+			break
+		}
+		page.Events = append(page.Events, r)
+	}
+	return page
+}
+
 // SaveMotion writes h265 clip (+ optional still jpeg + browser MP4) and indexes a motion event.
 func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, error) {
 	id := fmt.Sprintf("%s_%s_%d", ev.Cam, ev.At.Format("20060102_150405"), ev.At.UnixNano()%1e6)

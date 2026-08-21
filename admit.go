@@ -1,109 +1,99 @@
 package main
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
-const admitCPUMax = 70.0
+const (
+	detectQCap    = 24
+	detectQPerCam = 4
+)
 
-type cpuPercent interface {
-	Percent() float64
+type detectJob struct {
+	ev       DetectEvent
+	saveClip bool
 }
 
-type camSlot struct {
-	latest *DetectEvent
-	opened bool
-}
-
+// admissions is a bounded YOLO work queue (channel). Extra frames of the
+// same camera are skipped when that camera already has detectQPerCam queued
+// or the global channel is full — RTP never blocks.
 type admissions struct {
-	cpu    cpuPercent
-	cpuMax float64
-	wake   chan struct{}
-
-	mu   sync.Mutex
-	cams map[string]*camSlot
+	ch      chan detectJob
+	mu      sync.Mutex
+	pending map[string]int
+	perCam  int
 }
 
-func newAdmissions(cpu cpuPercent) *admissions {
+func newAdmissions() *admissions {
 	return &admissions{
-		cpu:    cpu,
-		cpuMax: admitCPUMax,
-		wake:   make(chan struct{}, 1),
-		cams:   make(map[string]*camSlot),
+		ch:      make(chan detectJob, detectQCap),
+		pending: make(map[string]int),
+		perCam:  detectQPerCam,
 	}
 }
 
-func (a *admissions) slot(cam string) *camSlot {
-	s := a.cams[cam]
-	if s == nil {
-		s = &camSlot{}
-		a.cams[cam] = s
-	}
-	return s
-}
-
-func (a *admissions) loadHigh() bool {
-	return a.cpu != nil && a.cpu.Percent() > a.cpuMax
-}
-
-func (a *admissions) signal() {
-	select {
-	case a.wake <- struct{}{}:
-	default:
-	}
-}
-
-// mark overwrites this camera's latest sample. opened sticks until pull.
-func (a *admissions) mark(cam string, ev DetectEvent, opened bool) {
+func (a *admissions) push(ev DetectEvent, saveClip bool) bool {
 	if a == nil {
-		return
+		return true
 	}
 	a.mu.Lock()
-	s := a.slot(cam)
-	s.latest = &ev
-	if opened {
-		s.opened = true
+	if a.pending[ev.Cam] >= a.perCam {
+		a.mu.Unlock()
+		return false
+	}
+	a.pending[ev.Cam]++
+	a.mu.Unlock()
+
+	job := detectJob{ev: ev, saveClip: saveClip}
+	select {
+	case a.ch <- job:
+		return true
+	default:
+		a.mu.Lock()
+		a.pending[ev.Cam]--
+		if a.pending[ev.Cam] <= 0 {
+			delete(a.pending, ev.Cam)
+		}
+		a.mu.Unlock()
+		return false
+	}
+}
+
+func (a *admissions) recv(ctx context.Context) (DetectEvent, bool, bool) {
+	if a == nil {
+		<-ctx.Done()
+		return DetectEvent{}, false, false
+	}
+	select {
+	case <-ctx.Done():
+		return DetectEvent{}, false, false
+	case job := <-a.ch:
+		a.debit(job.ev.Cam)
+		return job.ev, job.saveClip, true
+	}
+}
+
+func (a *admissions) pull() (DetectEvent, bool, bool) {
+	if a == nil {
+		return DetectEvent{}, false, false
+	}
+	select {
+	case job := <-a.ch:
+		a.debit(job.ev.Cam)
+		return job.ev, job.saveClip, true
+	default:
+		return DetectEvent{}, false, false
+	}
+}
+
+func (a *admissions) debit(cam string) {
+	a.mu.Lock()
+	n := a.pending[cam] - 1
+	if n <= 0 {
+		delete(a.pending, cam)
+	} else {
+		a.pending[cam] = n
 	}
 	a.mu.Unlock()
-	a.signal()
-}
-
-// pull takes one latest sample. When CPU is high, only a cam that just opened.
-func (a *admissions) pull() (ev DetectEvent, opened bool, ok bool) {
-	if a == nil {
-		return DetectEvent{}, false, false
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if ev, opened, ok = a.takeOpened(); ok {
-		return ev, opened, true
-	}
-	if a.loadHigh() {
-		return DetectEvent{}, false, false
-	}
-	return a.takeAny()
-}
-
-func (a *admissions) takeOpened() (DetectEvent, bool, bool) {
-	for _, s := range a.cams {
-		if s.latest != nil && s.opened {
-			return a.take(s)
-		}
-	}
-	return DetectEvent{}, false, false
-}
-
-func (a *admissions) takeAny() (DetectEvent, bool, bool) {
-	for _, s := range a.cams {
-		if s.latest != nil {
-			return a.take(s)
-		}
-	}
-	return DetectEvent{}, false, false
-}
-
-func (a *admissions) take(s *camSlot) (DetectEvent, bool, bool) {
-	ev := *s.latest
-	opened := s.opened
-	s.latest = nil
-	s.opened = false
-	return ev, opened, true
 }
