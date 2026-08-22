@@ -174,8 +174,6 @@ func runYOLOWorker(ctx context.Context, adm *admissions, logQ chan<- string, sto
 }
 
 func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig, occ *occupancy) {
-	logQ <- fmt.Sprintf("%s: yolo start %s %d aus %.1fMB", ev.Cam, ev.Label, len(ev.Segments), eventMB(ev))
-
 	mainRGB, frames, ok := decodeRGBNearEnd(ev.Segments, inferSize, inferSize)
 	var stillPlain []byte
 	if ok {
@@ -215,13 +213,14 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 		topName = dets[0].Class
 		topScore = dets[0].Score
 	}
-	logQ <- fmt.Sprintf("%s: main frames=%d infer=%.0fms pass=%v dets=%d fresh=%d score=%.2f %s",
-		ev.Cam, frames, mainMS, mainPass, len(dets), len(fresh), topScore, topName)
-
 	if !mainPass {
-		logQ <- fmt.Sprintf("%s: stage done (main reject)", ev.Cam)
+		if len(dets) > 0 {
+			logQ <- fmt.Sprintf("%s: same %s %.2f (no new alert)", ev.Cam, topName, topScore)
+		}
 		return
 	}
+	logQ <- fmt.Sprintf("%s: main frames=%d infer=%.0fms pass=%v dets=%d fresh=%d score=%.2f %s",
+		ev.Cam, frames, mainMS, mainPass, len(dets), len(fresh), topScore, topName)
 	dets = fresh
 
 	ann, err := AnnotateRGB(mainRGB, inferSize, inferSize, dets, 90)

@@ -109,6 +109,13 @@ func TestQuietBlob_needAboveMedian(t *testing.T) {
 	if need != 20 {
 		t.Fatalf("need %d want 20 (2*median); 32-cell floor?", need)
 	}
+	var still quietBlob
+	for i := 0; i < noiseNeed; i++ {
+		still.push(1)
+	}
+	if n := still.need(3); n != 16 {
+		t.Fatalf("still-scene need %d want 16 (quiet blob cutoff), not minBlob", n)
+	}
 	if !motionHit(0, 24, 24, 3, need, 0) {
 		t.Fatal("blob 24 should fire when need is 20 (32-cell floor?)")
 	}

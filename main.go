@@ -219,6 +219,10 @@ func patchCameraSettings(path string, updates []camMotionSettings) error {
 }
 
 func main() {
+	if os.Getenv("LIBVA_MESSAGING_LEVEL") == "" {
+		os.Setenv("LIBVA_MESSAGING_LEVEL", "0")
+	}
+
 	cfgPath := "cameras.json"
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
@@ -422,6 +426,7 @@ func runHeadless(ctx context.Context, cancel context.CancelFunc, logQ <-chan str
 		signal.Stop(sig)
 		cancel()
 	}()
+	go runLogCap(ctx, stdoutPath())
 
 	startAt := time.Now()
 	sampler := &cpuSampler{}

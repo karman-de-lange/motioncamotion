@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	occPersonTTL   = 25 * time.Second
+	occPersonTTL   = 5 * time.Second
 	occAnimalTTL   = 45 * time.Second
 	occGoneSamples = 3
 	occIoU         = 0.40
@@ -118,6 +118,21 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 	defer o.mu.Unlock()
 
 	tracks := o.cams[cam]
+	alive := tracks[:0]
+	for _, tr := range tracks {
+		if tr.vehicle {
+			alive = append(alive, tr)
+			continue
+		}
+		ttl := occPersonTTL
+		if isAnimalClass(tr.classID) {
+			ttl = occAnimalTTL
+		}
+		if now.Sub(tr.lastSeen) < ttl {
+			alive = append(alive, tr)
+		}
+	}
+	tracks = alive
 	matched := make([]bool, len(tracks))
 	var fresh []DetBox
 	sawVehicle := false
@@ -177,7 +192,8 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 		if isAnimalClass(tr.classID) {
 			ttl = occAnimalTTL
 		}
-		if now.Sub(tr.lastSeen) < ttl {
+		tr.gone++
+		if tr.gone < occGoneSamples && now.Sub(tr.lastSeen) < ttl {
 			kept = append(kept, tr)
 		}
 	}

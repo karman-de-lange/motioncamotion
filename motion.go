@@ -135,6 +135,9 @@ func (q *quietBlob) need(minBlob int) int {
 	if minBlob > n {
 		n = minBlob
 	}
+	if n < 16 {
+		n = 16
+	}
 	return n
 }
 

@@ -493,7 +493,7 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) boo
 		w.adm.release(h)
 		return false
 	}
-	if w.logQ == nil {
+	if w.logQ == nil || !opened {
 		return true
 	}
 	if sad >= 0 {

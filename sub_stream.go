@@ -295,7 +295,7 @@ func (w *CameraWorker) runSubDecoded(
 		}
 
 		now := time.Now()
-		if el := now.Sub(rateWindowStart); el >= time.Second {
+		if el := now.Sub(rateWindowStart); el >= 30*time.Second {
 			sec := el.Seconds()
 			need := 0
 			if floor.ready() {
@@ -323,10 +323,14 @@ func (w *CameraWorker) runSubDecoded(
 			return
 		}
 
-		need := 0
-		if floor.ready() {
-			need = floor.need(w.minBlob)
+		if blobLooksQuiet(blob, nCh) {
+			floor.push(blob)
 		}
+		if !floor.ready() {
+			streak = 0
+			return
+		}
+		need := floor.need(w.minBlob)
 		if motionHit(sad, blob, nCh, w.minBlob, need, w.minCompact) {
 			quietN = 0
 			if streak < w.sustainFrames {
@@ -337,9 +341,6 @@ func (w *CameraWorker) runSubDecoded(
 				streak = 0
 			}
 		} else {
-			if blobLooksQuiet(blob, nCh) {
-				floor.push(blob)
-			}
 			streak = 0
 			if w.episode {
 				quietN++

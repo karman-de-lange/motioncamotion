@@ -47,6 +47,33 @@ func TestOccupancy_parkedCarNeedsNegativeObserve(t *testing.T) {
 	}
 }
 
+func TestOccupancy_personWalkOutWalkInIsFresh(t *testing.T) {
+	o := newOccupancy()
+	now := time.Now()
+	p := []DetBox{{Class: "person", ClassID: 0, Score: 0.8, X1: 0, Y1: 290, X2: 72, Y2: 496}}
+	if n := o.consume("hik1", p, now); len(n) != 1 {
+		t.Fatalf("first walk-in: %d", len(n))
+	}
+	for i := 0; i < occGoneSamples; i++ {
+		o.consume("hik1", nil, now.Add(time.Duration(i+1)*time.Second))
+	}
+	if n := o.consume("hik1", p, now.Add(4*time.Second)); len(n) != 1 {
+		t.Fatalf("walk-in after leaving should alert, got %d", len(n))
+	}
+}
+
+func TestOccupancy_personTTLAllowsReturn(t *testing.T) {
+	o := newOccupancy()
+	now := time.Now()
+	p := []DetBox{{Class: "person", ClassID: 0, Score: 0.8, X1: 0, Y1: 290, X2: 72, Y2: 496}}
+	if n := o.consume("hik1", p, now); len(n) != 1 {
+		t.Fatalf("first: %d", len(n))
+	}
+	if n := o.consume("hik1", p, now.Add(occPersonTTL+time.Second)); len(n) != 1 {
+		t.Fatalf("same door after person TTL should alert, got %d", len(n))
+	}
+}
+
 func TestOccupancy_twoPeopleSideBySide(t *testing.T) {
 	o := newOccupancy()
 	now := time.Now()
