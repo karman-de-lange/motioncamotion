@@ -15,7 +15,6 @@ struct VPLDecoder {
     mfxVideoParam dec_par;
     int dec_inited;
     mfxU32 codec_id;
-    int complete_au; /* 1 = one-shot RGB (YOLO); 0 = live sub thumbs */
 };
 
 static void downscale_y(const uint8_t *src, int src_w, int src_h, int src_pitch,
@@ -195,7 +194,7 @@ static void release_surf(mfxFrameSurface1 *s) {
     }
 }
 
-static int ensure_decoder(VPLDecoder *d, const uint8_t *data, size_t len) {
+static int ensure_decoder(VPLDecoder *d, const uint8_t *data, size_t len, int complete_au) {
     if (d->dec_inited) {
         return 0;
     }
@@ -205,7 +204,7 @@ static int ensure_decoder(VPLDecoder *d, const uint8_t *data, size_t len) {
     bs.Data = (mfxU8 *)data;
     bs.DataLength = (mfxU32)len;
     bs.MaxLength = (mfxU32)len;
-    if (d->codec_id == MFX_CODEC_AVC || d->complete_au) {
+    if (d->codec_id == MFX_CODEC_AVC || complete_au) {
         bs.DataFlag = MFX_BITSTREAM_COMPLETE_FRAME;
     }
 
@@ -235,8 +234,8 @@ static int ensure_decoder(VPLDecoder *d, const uint8_t *data, size_t len) {
  * Original simple HEVC frame decode (pre-Imou). H.264 extras must not live here.
  * Returns 0 + *decoded_out, 1 = need more data, <0 error.
  */
-static int decode_one_frame_hevc(VPLDecoder *d, const uint8_t *data, size_t len, mfxFrameSurface1 **decoded_out) {
-    int rc = ensure_decoder(d, data, len);
+static int decode_one_frame_hevc(VPLDecoder *d, const uint8_t *data, size_t len, mfxFrameSurface1 **decoded_out, int complete_au) {
+    int rc = ensure_decoder(d, data, len, complete_au);
     if (rc != 0) {
         return rc;
     }
@@ -246,7 +245,7 @@ static int decode_one_frame_hevc(VPLDecoder *d, const uint8_t *data, size_t len,
     bs.Data = (mfxU8 *)data;
     bs.DataLength = (mfxU32)len;
     bs.MaxLength = (mfxU32)len;
-    if (d->complete_au) {
+    if (complete_au) {
         bs.DataFlag = MFX_BITSTREAM_COMPLETE_FRAME;
     }
 
@@ -293,7 +292,7 @@ static int decode_one_frame_hevc(VPLDecoder *d, const uint8_t *data, size_t len,
 
 /* H.264-only: busy retry + null-bitstream drain. */
 static int decode_one_frame_avc(VPLDecoder *d, const uint8_t *data, size_t len, mfxFrameSurface1 **decoded_out) {
-    int rc = ensure_decoder(d, data, len);
+    int rc = ensure_decoder(d, data, len, 1);
     if (rc != 0) {
         return rc;
     }
@@ -368,11 +367,11 @@ static int decode_one_frame_avc(VPLDecoder *d, const uint8_t *data, size_t len, 
     return 1;
 }
 
-static int decode_one_frame(VPLDecoder *d, const uint8_t *data, size_t len, mfxFrameSurface1 **decoded_out) {
+static int decode_one_frame(VPLDecoder *d, const uint8_t *data, size_t len, mfxFrameSurface1 **decoded_out, int complete_au) {
     if (d->codec_id == MFX_CODEC_AVC) {
         return decode_one_frame_avc(d, data, len, decoded_out);
     }
-    return decode_one_frame_hevc(d, data, len, decoded_out);
+    return decode_one_frame_hevc(d, data, len, decoded_out, complete_au);
 }
 
 int vpl_decoder_new(VPLDecoder **out, int codec) {
@@ -504,7 +503,7 @@ int vpl_decoder_thumb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *y
     }
 
     mfxFrameSurface1 *decoded = NULL;
-    int rc = decode_one_frame(d, data, len, &decoded);
+    int rc = decode_one_frame(d, data, len, &decoded, 0);
     if (rc != 0) {
         return rc;
     }
@@ -523,7 +522,7 @@ int vpl_decoder_thumb_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
     }
 
     mfxFrameSurface1 *decoded = NULL;
-    int rc = decode_one_frame(d, data, len, &decoded);
+    int rc = decode_one_frame(d, data, len, &decoded, 0);
     if (rc != 0) {
         return rc;
     }
@@ -539,9 +538,7 @@ int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
     if (!d || !data || len == 0 || !y_out || !uv_out || !out_w || !out_h) {
         return -1;
     }
-    d->complete_au = 1;
-
-    int rc = ensure_decoder(d, data, len);
+    int rc = ensure_decoder(d, data, len, 1);
     if (rc != 0) {
         return rc;
     }
@@ -560,7 +557,7 @@ int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
     }
 
     mfxFrameSurface1 *decoded = NULL;
-    rc = decode_one_frame(d, data, len, &decoded);
+    rc = decode_one_frame(d, data, len, &decoded, 1);
     if (rc != 0) {
         return rc;
     }
@@ -616,7 +613,7 @@ int vpl_decoder_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
     }
 
     mfxFrameSurface1 *decoded = NULL;
-    int rc = decode_one_frame(d, data, len, &decoded);
+    int rc = decode_one_frame(d, data, len, &decoded, 0);
     if (rc != 0) {
         return rc;
     }

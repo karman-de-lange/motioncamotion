@@ -92,7 +92,6 @@ const (
 	noiseWin    = 48
 	noiseNeed   = 16
 	autoCompact = 0.25
-	wideBlobMin = 32
 )
 
 // quietBlob tracks this camera's typical noise blob (foliage, not people).
@@ -133,9 +132,6 @@ func (q *quietBlob) median() int {
 
 func (q *quietBlob) need(minBlob int) int {
 	n := q.median() * 2
-	if n < wideBlobMin {
-		n = wideBlobMin
-	}
 	if minBlob > n {
 		n = minBlob
 	}
@@ -146,20 +142,13 @@ func motionHit(sad float64, blob, nCh, minBlob, needBlob int, minCompact float64
 	if blob < minBlob {
 		return false
 	}
-	needC := minCompact
-	if needC <= 0 {
-		needC = autoCompact
-	}
-	if nCh >= 16 && compactness(blob, nCh) < needC {
+	if minCompact > 0 && nCh >= 16 && compactness(blob, nCh) < minCompact {
 		return false
 	}
-	if needBlob > 0 {
-		return blob >= needBlob
+	if needBlob > 0 && blob < needBlob {
+		return false
 	}
-	if sad >= 0 && blob >= wideBlobMin && compactness(blob, nCh) >= needC {
-		return true
-	}
-	return false
+	return true
 }
 
 // maxBlob returns the largest 4-connected region of changed cells.

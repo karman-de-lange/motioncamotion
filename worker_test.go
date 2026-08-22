@@ -43,6 +43,16 @@ func (s *closeWaitStub) wait(ctx context.Context) {
 	<-s.closed
 }
 
+func assertAdmitIdle(t *testing.T, a *admissions) {
+	t.Helper()
+	if a.held != 0 {
+		t.Fatalf("held=%d want 0", a.held)
+	}
+	if len(a.pending) != 0 {
+		t.Fatalf("pending=%v want empty", a.pending)
+	}
+}
+
 func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
 	w.adm = newAdmissions()
@@ -53,6 +63,7 @@ func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
 	if _, _, ok := w.adm.pull(); ok {
 		t.Fatal("marked without segments")
 	}
+	assertAdmitIdle(t, w.adm)
 	w.ring.push([]byte("au"))
 	w.fireMotion(4)
 	ev, opened, ok := w.adm.pull()
@@ -73,6 +84,16 @@ func TestEnqueueDetect_emptyRingNoMark(t *testing.T) {
 	if _, _, ok := w.adm.pull(); ok {
 		t.Fatal("marked without segments")
 	}
+	assertAdmitIdle(t, w.adm)
+	w.adm.perCam = 1
+	w.ring.push([]byte("au"))
+	if !w.enqueueDetect("motion", 2, false) {
+		t.Fatal("extra after released empty-ring hold")
+	}
+	ev, opened, ok := w.adm.pull()
+	if !ok || ev.SAD != 2 || opened {
+		t.Fatalf("want extra sad=2 got sad=%v opened=%v ok=%v", ev.SAD, opened, ok)
+	}
 }
 
 func TestEnqueueDetect_queuesMultiple(t *testing.T) {
@@ -92,6 +113,71 @@ func TestEnqueueDetect_queuesMultiple(t *testing.T) {
 	ev, opened, ok = w.adm.pull()
 	if !ok || ev.SAD != 2 || opened {
 		t.Fatalf("want second sad=2 got sad=%v opened=%v ok=%v", ev.SAD, opened, ok)
+	}
+}
+
+func TestEnqueueDetect_overwriteKeepsLatest(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions()
+	w.adm.perCam = 1
+	w.ring.push([]byte("au"))
+	if !w.enqueueDetect("motion", 1, false) {
+		t.Fatal("first extra")
+	}
+	if !w.enqueueDetect("motion", 2, false) {
+		t.Fatal("full extra must replace, not skip")
+	}
+	ev, opened, ok := w.adm.pull()
+	if !ok || ev.SAD != 2 || opened {
+		t.Fatalf("want latest extra sad=2 got sad=%v opened=%v ok=%v", ev.SAD, opened, ok)
+	}
+	if _, _, ok := w.adm.pull(); ok {
+		t.Fatal("expected single extra after overwrite")
+	}
+}
+
+func TestEnqueueDetect_openNeverSkipped(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions()
+	w.adm.perCam = 1
+	w.adm.cap = 1
+	w.ring.push([]byte("au"))
+	if !w.enqueueDetect("motion", 1, false) {
+		t.Fatal("extra")
+	}
+	if !w.enqueueDetect("motion", 2, true) {
+		t.Fatal("open must not skip when per-cam and global cap are full")
+	}
+	found := false
+	for i := 0; i < 4; i++ {
+		ev, opened, ok := w.adm.pull()
+		if !ok {
+			break
+		}
+		if opened && ev.SAD == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("open job missing")
+	}
+}
+
+func TestEnqueueDetect_skipDoesNotSnapshot(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions()
+	w.adm.perCam = 1
+	w.ring.push([]byte("au"))
+	if !w.enqueueDetect("motion", 1, true) {
+		t.Fatal("open")
+	}
+	n := 0
+	w.ring.onSnapshot = func() { n++ }
+	if w.enqueueDetect("motion", 2, false) {
+		t.Fatal("extra with only an open slot should skip")
+	}
+	if n != 0 {
+		t.Fatal("snapshot on drop path")
 	}
 }
 

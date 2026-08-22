@@ -20,9 +20,13 @@ type yoloConfig struct {
 	MainConf float64
 }
 
-// Small boxes (stump, stick) need higher conf than a full-height person.
-const smallDetH = inferSize / 8 // 80px on 640
+const smallDetH = inferSize / 8
 const smallDetConf = 0.65
+const stumpMaxAspect = 1.5
+
+func stumpGeom(w, h float64) bool {
+	return h < float64(smallDetH) && w > 0 && h < w*stumpMaxAspect
+}
 
 func filterDets(dets []DetBox, conf float64) []DetBox {
 	out := dets[:0]
@@ -32,7 +36,7 @@ func filterDets(dets []DetBox, conf float64) []DetBox {
 		if h <= 0 || w <= 0 || d.Score < conf {
 			continue
 		}
-		if h < float64(smallDetH) && d.Score < smallDetConf {
+		if stumpGeom(w, h) && d.Score < smallDetConf {
 			continue
 		}
 		out = append(out, d)

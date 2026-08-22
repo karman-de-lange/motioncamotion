@@ -461,11 +461,22 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) boo
 	if w.ring == nil {
 		return false
 	}
+	var h admitHold
+	if w.adm != nil {
+		oh, ok := w.adm.hold(w.cfg.Name, opened)
+		if !ok {
+			return false
+		}
+		h = oh
+	}
 	segments := w.ring.snapshot(snapshotDur)
 	if len(segments) == 0 {
 		segments = w.ring.snapshot(ringKeepDur)
 	}
 	if len(segments) == 0 {
+		if w.adm != nil {
+			w.adm.release(h)
+		}
 		if w.logQ != nil {
 			w.logQ <- fmt.Sprintf("%s: motion drop (no main AUs)", w.cfg.Name)
 		}
@@ -478,7 +489,8 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) boo
 		SAD:      sad,
 		Label:    label,
 	}
-	if w.adm != nil && !w.adm.push(ev, opened) {
+	if w.adm != nil && !w.adm.fill(h, ev) {
+		w.adm.release(h)
 		return false
 	}
 	if w.logQ == nil {

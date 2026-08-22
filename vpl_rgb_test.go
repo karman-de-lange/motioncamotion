@@ -463,6 +463,129 @@ func TestVPLRGB_hevcPFramesNotGreen(t *testing.T) {
 	}
 }
 
+func countClipRGBOK(t *testing.T, dec FrameDecoder, aus [][]byte) int {
+	t.Helper()
+	buf := make([]byte, inferSize*inferSize*3)
+	n := 0
+	for _, au := range aus {
+		if len(au) == 0 {
+			continue
+		}
+		if dec.RGB(au, buf, inferSize, inferSize) == DecOK {
+			n++
+		}
+	}
+	return n
+}
+
+func countClipThumbs(t *testing.T, dec FrameDecoder, aus [][]byte) int {
+	t.Helper()
+	y := make([]byte, thumbSize)
+	n := 0
+	for _, au := range aus {
+		if len(au) == 0 {
+			continue
+		}
+		if dec.Thumb(au, y) == DecOK {
+			n++
+		}
+	}
+	return n
+}
+
+func countClipRGBFit(t *testing.T, dec FrameDecoder, aus [][]byte) int {
+	t.Helper()
+	buf := make([]byte, inferSize*inferSize*3)
+	n := 0
+	for _, au := range aus {
+		if len(au) == 0 {
+			continue
+		}
+		_, _, rc := dec.RGBFit(au, buf, inferSize, inferSize)
+		if rc == DecOK {
+			n++
+		}
+	}
+	return n
+}
+
+func TestVPL_hevcThumbWithoutCompleteFrame(t *testing.T) {
+	data, err := os.ReadFile("clips/hik1_20260611_224034.h265")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aus := hevcGOPAUs(data, false)
+	if len(aus) < 3 {
+		t.Fatalf("need several AUs, got %d", len(aus))
+	}
+	nv12Bar := len(aus) * 3 / 4
+
+	nv12, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || nv12 == nil {
+		t.Fatalf("nv12 decoder new %d", rc)
+	}
+	nv12N := countClipRGBOK(t, nv12, aus)
+	nv12.Close()
+	if nv12N < nv12Bar {
+		t.Fatalf("nv12 pictures=%d aus=%d", nv12N, len(aus))
+	}
+
+	thumb, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || thumb == nil {
+		t.Fatalf("thumb decoder new %d", rc)
+	}
+	tn := countClipThumbs(t, thumb, aus)
+	thumb.Close()
+	if tn < 2 || tn*4 < len(aus) {
+		t.Fatalf("thumb pictures=%d aus=%d (stalled?)", tn, len(aus))
+	}
+	if tn >= nv12Bar || tn >= nv12N {
+		t.Fatalf("thumb pictures=%d at NV12 complete-frame bar %d nv12=%d", tn, nv12Bar, nv12N)
+	}
+
+	fit, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || fit == nil {
+		t.Fatalf("rgb_fit decoder new %d", rc)
+	}
+	fn := countClipRGBFit(t, fit, aus)
+	fit.Close()
+	if fn < 2 || fn*4 < len(aus) {
+		t.Fatalf("rgb_fit pictures=%d aus=%d (stalled?)", fn, len(aus))
+	}
+	if fn >= nv12Bar || fn >= nv12N {
+		t.Fatalf("rgb_fit pictures=%d at NV12 complete-frame bar %d nv12=%d", fn, nv12Bar, nv12N)
+	}
+
+	base, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || base == nil {
+		t.Fatalf("base decoder new %d", rc)
+	}
+	y := make([]byte, thumbSize)
+	_ = base.Thumb(aus[0], y)
+	wantRest := countClipThumbs(t, base, aus[1:])
+	base.Close()
+	if wantRest < 1 {
+		t.Fatal("no thumbs after IDR")
+	}
+
+	mix, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || mix == nil {
+		t.Fatalf("mix decoder new %d", rc)
+	}
+	defer mix.Close()
+	rgbBuf := make([]byte, inferSize*inferSize*3)
+	if mix.RGB(aus[0], rgbBuf, inferSize, inferSize) != DecOK {
+		t.Fatal("rgb IDR")
+	}
+	after := countClipThumbs(t, mix, aus[1:])
+	if after < 1 {
+		t.Fatal("thumb after rgb stalled")
+	}
+	if after != wantRest {
+		t.Fatalf("thumb after rgb=%d want %d (no COMPLETE_FRAME)", after, wantRest)
+	}
+}
+
 func TestVPLRGB_decodeRGBNearEndNotGreen(t *testing.T) {
 	data, err := os.ReadFile("clips/hik1_20260611_224034.h265")
 	if err != nil {

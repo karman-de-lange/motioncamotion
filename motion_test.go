@@ -106,10 +106,12 @@ func TestQuietBlob_needAboveMedian(t *testing.T) {
 		t.Fatalf("ready=%v med=%d", q.ready(), q.median())
 	}
 	need := q.need(3)
-	if need < 24 {
-		t.Fatalf("need %d want at least 32-cap 24", need)
+	if need != 20 {
+		t.Fatalf("need %d want 20 (2*median); 32-cell floor?", need)
 	}
-	// compact person 80 vs quiet 10
+	if !motionHit(0, 24, 24, 3, need, 0) {
+		t.Fatal("blob 24 should fire when need is 20 (32-cell floor?)")
+	}
 	if !motionHit(0, 80, 80, 3, need, 0) {
 		t.Fatal("person blob should beat quiet median")
 	}
@@ -118,12 +120,24 @@ func TestQuietBlob_needAboveMedian(t *testing.T) {
 	}
 }
 
+func TestMotionHit_compactOff(t *testing.T) {
+	if !motionHit(3, 20, 200, 3, 20, 0) {
+		t.Fatal("minCompact=0 must not apply compactness")
+	}
+	if motionHit(3, 20, 200, 3, 20, 0.25) {
+		t.Fatal("minCompact=0.25 should reject blob/nChanged=0.1")
+	}
+}
+
 func TestMotionHit_wideShotPerson(t *testing.T) {
 	if !motionHit(0.78, 128, 128, 3, 0, 0) {
-		t.Fatal("compact wide-shot person should fire before baseline is ready")
+		t.Fatal("wide-shot person should fire before baseline is ready")
 	}
-	if motionHit(0.78, 8, 8, 3, 0, 0) {
-		t.Fatal("tiny blob should not fire on bootstrap path")
+	if motionHit(0.78, 2, 2, 3, 0, 0) {
+		t.Fatal("blob below minBlob should not fire")
+	}
+	if !motionHit(0.78, 8, 8, 3, 0, 0) {
+		t.Fatal("bootstrap must not hard-floor at 32 cells")
 	}
 	if motionHit(1.2, 40, 200, 3, 32, 0.35) {
 		t.Fatal("diffuse foliage should fail compactness")

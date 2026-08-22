@@ -11,10 +11,11 @@ type ringChunk struct {
 }
 
 type ringBuffer struct {
-	mu       sync.Mutex
-	chunks   []ringChunk
-	total    int
-	maxBytes int
+	mu         sync.Mutex
+	chunks     []ringChunk
+	total      int
+	maxBytes   int
+	onSnapshot func()
 }
 
 func newRingBuffer(maxBytes int) *ringBuffer {
@@ -59,6 +60,9 @@ func (r *ringBuffer) trim(keep time.Duration) {
 }
 
 func (r *ringBuffer) snapshot(keep time.Duration) [][]byte {
+	if r.onSnapshot != nil {
+		r.onSnapshot()
+	}
 	cutoff := time.Now().Add(-keep)
 
 	r.mu.Lock()
