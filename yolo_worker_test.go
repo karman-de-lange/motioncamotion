@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+func TestCocoNames_noSafariFurnitureClasses(t *testing.T) {
+	if cocoNames[20] != "" || cocoNames[22] != "" || cocoNames[23] != "" {
+		t.Fatal("elephant/zebra/giraffe must not be alert classes")
+	}
+	if cocoNames[14] != "animal" || cocoNames[15] != "animal" || cocoNames[19] != "animal" {
+		t.Fatalf("wildlife COCO ids should display as animal, got bird=%q cat=%q cow=%q", cocoNames[14], cocoNames[15], cocoNames[19])
+	}
+}
+
 func TestFilterDets_stumpVsPerson(t *testing.T) {
 	// hik51_1 16:50:14 person (large, 0.48) vs 16:50:15 stump (58px, 0.49).
 	person := DetBox{Class: "person", ClassID: 0, Score: 0.48, X1: 374, Y1: 158, X2: 485, Y2: 375}

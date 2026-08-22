@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+func TestMapDetsLetterboxToStill_1080p(t *testing.T) {
+	dets := []DetBox{{Class: "person", X1: 320, Y1: 140, X2: 400, Y2: 500}}
+	got := mapDetsLetterboxToStill(dets, 640, 640, 1920, 1080)
+	if len(got) != 1 {
+		t.Fatalf("len %d", len(got))
+	}
+	if got[0].Y1 < -1 || got[0].Y1 > 2 {
+		t.Fatalf("top pad should map to still y0, got y1=%.1f", got[0].Y1)
+	}
+	if got[0].Y2 < 1078 || got[0].Y2 > 1082 {
+		t.Fatalf("bottom of content should map to 1080, got y2=%.1f", got[0].Y2)
+	}
+	if got[0].X1 < 958 || got[0].X1 > 962 {
+		t.Fatalf("x1=%.1f want ~960", got[0].X1)
+	}
+}
+
 func TestAnnotateRGB_MultipleBoxes(t *testing.T) {
 	const w, h = 64, 64
 	rgb := make([]byte, w*h*3)

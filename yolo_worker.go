@@ -49,16 +49,12 @@ var cocoNames = map[int]string{
 	2:  "car",
 	5:  "bus",
 	7:  "truck",
-	14: "bird",
-	15: "cat",
-	16: "dog",
-	17: "horse",
-	18: "sheep",
-	19: "cow",
-	20: "elephant",
-	21: "bear",
-	22: "zebra",
-	23: "giraffe",
+	14: "animal",
+	15: "animal",
+	16: "animal",
+	17: "animal",
+	18: "animal",
+	19: "animal",
 }
 
 func newOVInfer(modelPath, device string) (*C.OVInfer, error) {
@@ -175,8 +171,11 @@ func runYOLOWorker(ctx context.Context, adm *admissions, logQ chan<- string, sto
 
 func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig, occ *occupancy) {
 	mainRGB, frames, ok := decodeRGBNearEnd(ev.Segments, inferSize, inferSize)
+	stillRGB, stillW, stillH, _, stillOK := decodeRGBFitNearEnd(ev.Segments, stillMaxW, stillMaxH)
 	var stillPlain []byte
-	if ok {
+	if stillOK {
+		stillPlain, _ = encodePreviewJPEG(stillRGB, stillW, stillH)
+	} else if ok {
 		stillPlain, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
 	}
 
@@ -223,7 +222,13 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 		ev.Cam, frames, mainMS, mainPass, len(dets), len(fresh), topScore, topName)
 	dets = fresh
 
-	ann, err := AnnotateRGB(mainRGB, inferSize, inferSize, dets, 90)
+	annRGB, annW, annH := mainRGB, inferSize, inferSize
+	annDets := dets
+	if stillOK {
+		annRGB, annW, annH = stillRGB, stillW, stillH
+		annDets = mapDetsLetterboxToStill(dets, inferSize, inferSize, stillW, stillH)
+	}
+	ann, err := AnnotateRGB(annRGB, annW, annH, annDets, 90)
 	if err != nil {
 		logQ <- fmt.Sprintf("%s: annotate failed: %v", ev.Cam, err)
 		ann = stillPlain

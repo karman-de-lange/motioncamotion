@@ -21,6 +21,8 @@ const (
 )
 
 const inferSize = 640
+const stillMaxW = 1920
+const stillMaxH = 1080
 
 // FrameDecoder turns annex-B access units into portable pixels.
 // Implementations are platform-specific (VPL, future NVDEC, VideoToolbox).
@@ -79,6 +81,40 @@ func decodeRGBNearEndWith(dec FrameDecoder, segments [][]byte, outW, outH int) (
 		return nil, frames, false
 	}
 	return last, frames, true
+}
+
+func decodeRGBFitNearEnd(segments [][]byte, maxW, maxH int) ([]byte, int, int, int, bool) {
+	dec, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || dec == nil {
+		return nil, 0, 0, 0, false
+	}
+	defer dec.Close()
+	if start := lastIRAPIndex(segments); start > 0 {
+		segments = segments[start:]
+	}
+	buf := make([]byte, maxW*maxH*3)
+	var last []byte
+	var lw, lh, frames int
+	for _, seg := range segments {
+		if len(seg) == 0 {
+			continue
+		}
+		w, h, r := dec.RGBFit(seg, buf, maxW, maxH)
+		if r != DecOK || w <= 0 || h <= 0 {
+			continue
+		}
+		frames++
+		n := w * h * 3
+		if n > len(buf) {
+			continue
+		}
+		last = append(last[:0], buf[:n]...)
+		lw, lh = w, h
+	}
+	if len(last) == 0 {
+		return nil, 0, 0, frames, false
+	}
+	return last, lw, lh, frames, true
 }
 
 func rgbCenterMean(rgb []byte) int {

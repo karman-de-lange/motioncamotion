@@ -36,7 +36,7 @@ func isVehicleClass(id int) bool {
 }
 
 func isAnimalClass(id int) bool {
-	return id >= 14 && id <= 23
+	return id >= 14 && id <= 19
 }
 
 func boxIoU(a, b occTrack) float64 {

@@ -11,13 +11,44 @@ import (
 
 // DetBox is one detection in model-input pixel space (same size as rgb).
 type DetBox struct {
-	Class  string  `json:"class"`
-	Score  float64 `json:"score"`
-	X1     float64 `json:"x1"`
-	Y1     float64 `json:"y1"`
-	X2     float64 `json:"x2"`
-	Y2     float64 `json:"y2"`
-	ClassID int    `json:"class_id"`
+	Class   string  `json:"class"`
+	Score   float64 `json:"score"`
+	X1      float64 `json:"x1"`
+	Y1      float64 `json:"y1"`
+	X2      float64 `json:"x2"`
+	Y2      float64 `json:"y2"`
+	ClassID int     `json:"class_id"`
+}
+
+func mapDetsLetterboxToStill(dets []DetBox, inferW, inferH, stillW, stillH int) []DetBox {
+	if inferW <= 0 || inferH <= 0 || stillW <= 0 || stillH <= 0 || len(dets) == 0 {
+		return dets
+	}
+	scaledW := inferW
+	scaledH := stillH * inferW / stillW
+	if scaledH > inferH {
+		scaledH = inferH
+		scaledW = stillW * inferH / stillH
+	}
+	padX := float64(inferW-scaledW) / 2
+	padY := float64(inferH-scaledH) / 2
+	cw := float64(scaledW)
+	ch := float64(scaledH)
+	if cw < 1 {
+		cw = 1
+	}
+	if ch < 1 {
+		ch = 1
+	}
+	out := make([]DetBox, len(dets))
+	for i, d := range dets {
+		d.X1 = (d.X1 - padX) / cw * float64(stillW)
+		d.X2 = (d.X2 - padX) / cw * float64(stillW)
+		d.Y1 = (d.Y1 - padY) / ch * float64(stillH)
+		d.Y2 = (d.Y2 - padY) / ch * float64(stillH)
+		out[i] = d
+	}
+	return out
 }
 
 // AnnotateRGB draws axis-aligned boxes + labels onto an RGB24 buffer and returns JPEG.

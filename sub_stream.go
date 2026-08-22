@@ -196,6 +196,7 @@ func (w *CameraWorker) runSubDecoded(
 	const (
 		moreDataStallN = 45
 		recreateMinGap = 500 * time.Millisecond
+		recreateWait   = 8 * time.Second
 		// Large gap between live thumbs → clear thumb ring (avoid false 99% after stall).
 		thumbGapRebase = 2 * time.Second
 	)
@@ -206,12 +207,13 @@ func (w *CameraWorker) runSubDecoded(
 	olderBuf := make([]byte, thumbSize)
 
 	var loggedErr bool
-	var lastRecreate time.Time
+	lastRecreate := time.Now()
 	var lastThumbAt time.Time
 	var moreDataStreak int
 	var streak int
 	var quietN int
 	var floor quietBlob
+	var liveOK bool
 	thumb := make([]byte, thumbSize)
 
 	// Rate log: AUs vs live thumbs per second (no oneshot path).
@@ -254,6 +256,20 @@ func (w *CameraWorker) runSubDecoded(
 			moreDataStreak++
 		} else if rc == DecOK {
 			moreDataStreak = 0
+			liveOK = true
+		}
+
+		now := time.Now()
+		if el := now.Sub(rateWindowStart); el >= 30*time.Second {
+			sec := el.Seconds()
+			need := 0
+			if floor.ready() {
+				need = floor.need(w.minBlob)
+			}
+			w.logQ <- fmt.Sprintf("%s: rate au=%.1f/s live_thumb=%.1f/s blob≥%d",
+				w.cfg.Name, float64(auN)/sec, float64(liveThumbN)/sec, need)
+			auN, liveThumbN = 0, 0
+			rateWindowStart = now
 		}
 
 		if !gotThumb {
@@ -263,11 +279,18 @@ func (w *CameraWorker) runSubDecoded(
 					loggedErr = true
 				}
 			}
-			// Stuck live session: hard error or long MORE_DATA streak → recreate live decoder.
-			stalled := rc != DecMoreData || moreDataStreak >= moreDataStallN
-			if stalled && time.Since(lastRecreate) >= recreateMinGap {
-				lastRecreate = time.Now()
+			wait := now.Sub(lastRecreate)
+			stalled := moreDataStreak >= moreDataStallN
+			if liveOK && rc != DecMoreData && rc != DecOK {
+				stalled = true
+			}
+			if !liveOK && wait >= recreateWait {
+				stalled = true
+			}
+			if stalled && wait >= recreateMinGap {
+				lastRecreate = now
 				moreDataStreak = 0
+				liveOK = false
 				if dec != nil {
 					dec.Close()
 					dec = nil
@@ -292,19 +315,6 @@ func (w *CameraWorker) runSubDecoded(
 
 		if onDecodedFrame != nil && rc == DecOK {
 			onDecodedFrame()
-		}
-
-		now := time.Now()
-		if el := now.Sub(rateWindowStart); el >= 30*time.Second {
-			sec := el.Seconds()
-			need := 0
-			if floor.ready() {
-				need = floor.need(w.minBlob)
-			}
-			w.logQ <- fmt.Sprintf("%s: rate au=%.1f/s live_thumb=%.1f/s blob≥%d",
-				w.cfg.Name, float64(auN)/sec, float64(liveThumbN)/sec, need)
-			auN, liveThumbN = 0, 0
-			rateWindowStart = now
 		}
 		if !lastThumbAt.IsZero() && now.Sub(lastThumbAt) > thumbGapRebase {
 			tRing.clear()

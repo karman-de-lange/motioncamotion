@@ -613,7 +613,7 @@ int vpl_decoder_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
     }
 
     mfxFrameSurface1 *decoded = NULL;
-    int rc = decode_one_frame(d, data, len, &decoded, 0);
+    int rc = decode_one_frame(d, data, len, &decoded, 1);
     if (rc != 0) {
         return rc;
     }
@@ -633,6 +633,11 @@ int vpl_decoder_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
     int sw = decoded->Info.CropW ? decoded->Info.CropW : decoded->Info.Width;
     int sh = decoded->Info.CropH ? decoded->Info.CropH : decoded->Info.Height;
     const uint8_t *y = decoded->Data.Y;
+    int surf_h = decoded->Info.Height > 0 ? (int)decoded->Info.Height : sh;
+    const uint8_t *uv = surface_uv(decoded, pitch, surf_h);
+    if (vpl_uv_plane_dead(uv, pitch, sw, sh)) {
+        uv = NULL;
+    }
 
     int dw = 0, dh = 0;
     fit_size(sw, sh, max_w, max_h, &dw, &dh);
@@ -641,7 +646,7 @@ int vpl_decoder_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
         decoded->FrameInterface->Release(decoded);
         return -2;
     }
-    y_to_rgb_fill(y, pitch, sw, sh, rgb_out, dw, dh);
+    nv12_to_rgb_fill(y, uv, pitch, sw, sh, rgb_out, dw, dh);
     *out_w = dw;
     *out_h = dh;
 

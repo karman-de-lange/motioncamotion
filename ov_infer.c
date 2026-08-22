@@ -27,9 +27,10 @@ static void rgb_to_nchw_f32(const uint8_t *rgb, int w, int h, float *dst) {
 }
 
 static int class_wanted(int cls) {
-	/* person, car, bus, truck + COCO animals 14–23 (bird through giraffe). */
+	/* person, car, bus, truck + bird/cat/dog/horse/sheep/cow as "animal".
+	 * Skip elephant/bear/zebra/giraffe — chairs and tarps map onto those. */
 	return cls == 0 || cls == 2 || cls == 5 || cls == 7 ||
-	       (cls >= 14 && cls <= 23);
+	       (cls >= 14 && cls <= 19);
 }
 
 static float box_iou(float ax1, float ay1, float ax2, float ay2,
