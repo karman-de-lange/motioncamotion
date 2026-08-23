@@ -56,7 +56,7 @@ func assertAdmitIdle(t *testing.T, a *admissions) {
 func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
 	w.adm = newAdmissions()
-	w.fireMotion(4)
+	w.fireMotion(4, 0, 0, 0, 0)
 	if w.episode {
 		t.Fatal("empty ring latched episode")
 	}
@@ -65,7 +65,7 @@ func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
 	}
 	assertAdmitIdle(t, w.adm)
 	w.ring.push([]byte("au"))
-	w.fireMotion(4)
+	w.fireMotion(4, 0, 0, 0, 0)
 	ev, opened, ok := w.adm.pull()
 	if !ok {
 		t.Fatal("expected mark after ring has AUs")
@@ -78,7 +78,7 @@ func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
 func TestEnqueueDetect_emptyRingNoMark(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
 	w.adm = newAdmissions()
-	if w.enqueueDetect("motion", 1, true) {
+	if w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
 		t.Fatal("empty ring reported mark")
 	}
 	if _, _, ok := w.adm.pull(); ok {
@@ -87,7 +87,7 @@ func TestEnqueueDetect_emptyRingNoMark(t *testing.T) {
 	assertAdmitIdle(t, w.adm)
 	w.adm.perCam = 1
 	w.ring.push([]byte("au"))
-	if !w.enqueueDetect("motion", 2, false) {
+	if !w.enqueueDetect("motion", 2, false, 0, 0, 0, 0) {
 		t.Fatal("extra after released empty-ring hold")
 	}
 	ev, opened, ok := w.adm.pull()
@@ -100,10 +100,10 @@ func TestEnqueueDetect_queuesMultiple(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
 	w.adm = newAdmissions()
 	w.ring.push([]byte("au"))
-	if !w.enqueueDetect("motion", 1, true) {
+	if !w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
 		t.Fatal("first")
 	}
-	if !w.enqueueDetect("motion", 2, false) {
+	if !w.enqueueDetect("motion", 2, false, 0, 0, 0, 0) {
 		t.Fatal("second")
 	}
 	ev, opened, ok := w.adm.pull()
@@ -121,10 +121,10 @@ func TestEnqueueDetect_overwriteKeepsLatest(t *testing.T) {
 	w.adm = newAdmissions()
 	w.adm.perCam = 1
 	w.ring.push([]byte("au"))
-	if !w.enqueueDetect("motion", 1, false) {
+	if !w.enqueueDetect("motion", 1, false, 0, 0, 0, 0) {
 		t.Fatal("first extra")
 	}
-	if !w.enqueueDetect("motion", 2, false) {
+	if !w.enqueueDetect("motion", 2, false, 0, 0, 0, 0) {
 		t.Fatal("full extra must replace, not skip")
 	}
 	ev, opened, ok := w.adm.pull()
@@ -142,10 +142,10 @@ func TestEnqueueDetect_openNeverSkipped(t *testing.T) {
 	w.adm.perCam = 1
 	w.adm.cap = 1
 	w.ring.push([]byte("au"))
-	if !w.enqueueDetect("motion", 1, false) {
+	if !w.enqueueDetect("motion", 1, false, 0, 0, 0, 0) {
 		t.Fatal("extra")
 	}
-	if !w.enqueueDetect("motion", 2, true) {
+	if !w.enqueueDetect("motion", 2, true, 0, 0, 0, 0) {
 		t.Fatal("open must not skip when per-cam and global cap are full")
 	}
 	found := false
@@ -168,12 +168,12 @@ func TestEnqueueDetect_skipDoesNotSnapshot(t *testing.T) {
 	w.adm = newAdmissions()
 	w.adm.perCam = 1
 	w.ring.push([]byte("au"))
-	if !w.enqueueDetect("motion", 1, true) {
+	if !w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
 		t.Fatal("open")
 	}
 	n := 0
 	w.ring.onSnapshot = func() { n++ }
-	if w.enqueueDetect("motion", 2, false) {
+	if w.enqueueDetect("motion", 2, false, 0, 0, 0, 0) {
 		t.Fatal("extra with only an open slot should skip")
 	}
 	if n != 0 {
@@ -191,6 +191,25 @@ func TestApplyMotion_updatesGates(t *testing.T) {
 	if got.Threshold < 0.079 || got.Threshold > 0.081 || got.MotionMinBlob != 20 ||
 		got.MotionMinCompact != 0.4 || got.MotionSustainFrames != 4 {
 		t.Fatalf("settings %+v", got)
+	}
+}
+
+func TestApplyMotion_rebuildsIgnoreMask(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c"}, 3, 1024, 2, 6, 3, 6, nil)
+	if w.ignoreMask() != nil {
+		t.Fatal("no masks at start")
+	}
+	w.ApplyMotion(camMotionSettings{
+		Name: "c", Threshold: 0.03, MotionMinBlob: 6,
+		MotionMinCompact: 0, MotionSustainFrames: 2,
+		MotionMasks: []MotionMask{{X: 0, Y: 0, W: 0.5, H: 0.5}},
+	})
+	ign := w.ignoreMask()
+	if ign == nil || !ign[0] {
+		t.Fatal("top-left should be ignored")
+	}
+	if ign[thumbSize-1] {
+		t.Fatal("bottom-right should still count")
 	}
 }
 

@@ -51,6 +51,25 @@ func mapDetsLetterboxToStill(dets []DetBox, inferW, inferH, stillW, stillH int) 
 	return out
 }
 
+func mapThumbRectToStill(x, y, w, h, stillW, stillH int) (x1, y1, x2, y2 float64) {
+	if stillW <= 0 || stillH <= 0 || w <= 0 || h <= 0 {
+		return 0, 0, 0, 0
+	}
+	x1 = float64(x) / float64(thumbW) * float64(stillW)
+	y1 = float64(y) / float64(thumbH) * float64(stillH)
+	x2 = float64(x+w) / float64(thumbW) * float64(stillW)
+	y2 = float64(y+h) / float64(thumbH) * float64(stillH)
+	return x1, y1, x2, y2
+}
+
+func motionBlobDet(ev DetectEvent, stillW, stillH int) []DetBox {
+	if ev.BlobW <= 0 || ev.BlobH <= 0 {
+		return nil
+	}
+	x1, y1, x2, y2 := mapThumbRectToStill(ev.BlobX, ev.BlobY, ev.BlobW, ev.BlobH, stillW, stillH)
+	return []DetBox{{Class: "motion", Score: ev.SAD / 100, X1: x1, Y1: y1, X2: x2, Y2: y2}}
+}
+
 // AnnotateRGB draws axis-aligned boxes + labels onto an RGB24 buffer and returns JPEG.
 func AnnotateRGB(rgb []byte, width, height int, dets []DetBox, quality int) ([]byte, error) {
 	if width <= 0 || height <= 0 || len(rgb) < width*height*3 {
@@ -76,8 +95,12 @@ func AnnotateRGB(rgb []byte, width, height int, dets []DetBox, quality int) ([]b
 		{80, 160, 255, 255},
 		{255, 220, 40, 255},
 	}
+	motionCol := color.RGBA{255, 210, 40, 255}
 	for i, d := range dets {
 		col := palette[i%len(palette)]
+		if d.Class == "motion" {
+			col = motionCol
+		}
 		x1 := clampInt(int(d.X1), 0, width-1)
 		y1 := clampInt(int(d.Y1), 0, height-1)
 		x2 := clampInt(int(d.X2), 0, width-1)

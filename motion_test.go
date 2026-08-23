@@ -84,6 +84,10 @@ func TestMaxBlob_connectedRegion(t *testing.T) {
 	if b := maxBlob(ch, thumbW, thumbH); b != 4 {
 		t.Fatalf("2x2: want blob 4 got %d", b)
 	}
+	n, x0, y0, x1, y1 := maxBlobBounds(ch, thumbW, thumbH)
+	if n != 4 || x0 != 0 || y0 != 0 || x1 != 1 || y1 != 1 {
+		t.Fatalf("bounds n=%d box=(%d,%d)-(%d,%d)", n, x0, y0, x1, y1)
+	}
 }
 
 // motionGate mirrors sub_stream fire condition (shipped order).

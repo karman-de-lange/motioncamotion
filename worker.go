@@ -108,26 +108,31 @@ func (w *CameraWorker) Name() string {
 }
 
 type camMotionSettings struct {
-	Name                string  `json:"name"`
-	Threshold           float64 `json:"threshold"`
-	MotionMinBlob       int     `json:"motion_min_blob"`
-	MotionMinCompact    float64 `json:"motion_min_compact"`
-	MotionSustainFrames int     `json:"motion_sustain_frames"`
+	Name                string       `json:"name"`
+	Threshold           float64      `json:"threshold"`
+	MotionMinBlob       int          `json:"motion_min_blob"`
+	MotionMinCompact    float64      `json:"motion_min_compact"`
+	MotionSustainFrames int          `json:"motion_sustain_frames"`
+	MotionMasks         []MotionMask `json:"motion_masks"`
 }
 
 func (w *CameraWorker) MotionSettings() camMotionSettings {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	masks := append([]MotionMask(nil), w.cfg.MotionMasks...)
 	return camMotionSettings{
 		Name:                w.cfg.Name,
 		Threshold:           w.sadCutoff / 100,
 		MotionMinBlob:       w.minBlob,
 		MotionMinCompact:    w.minCompact,
 		MotionSustainFrames: w.sustainFrames,
+		MotionMasks:         masks,
 	}
 }
 
 func (w *CameraWorker) ApplyMotion(s camMotionSettings) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if s.Threshold > 0 {
 		w.sadCutoff = s.Threshold * 100
 	}
@@ -140,6 +145,16 @@ func (w *CameraWorker) ApplyMotion(s camMotionSettings) {
 	if s.MotionSustainFrames > 0 {
 		w.sustainFrames = s.MotionSustainFrames
 	}
+	if s.MotionMasks != nil {
+		w.cfg.MotionMasks = append([]MotionMask(nil), s.MotionMasks...)
+		w.ignore = buildIgnoreMask(w.cfg.MotionMasks)
+	}
+}
+
+func (w *CameraWorker) ignoreMask() []bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.ignore
 }
 
 func (w *CameraWorker) setSubCodec(codec int) {
@@ -457,7 +472,7 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 	}
 }
 
-func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) bool {
+func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool, blobX, blobY, blobW, blobH int) bool {
 	if w.ring == nil {
 		return false
 	}
@@ -488,6 +503,10 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) boo
 		Segments: segments,
 		SAD:      sad,
 		Label:    label,
+		BlobX:    blobX,
+		BlobY:    blobY,
+		BlobW:    blobW,
+		BlobH:    blobH,
 	}
 	if w.adm != nil && !w.adm.fill(h, ev) {
 		w.adm.release(h)
@@ -504,13 +523,13 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool) boo
 	return true
 }
 
-func (w *CameraWorker) fireMotion(sad float64) {
+func (w *CameraWorker) fireMotion(sad float64, blobX, blobY, blobW, blobH int) {
 	opened := !w.episode
-	if w.enqueueDetect("motion", sad, opened) {
+	if w.enqueueDetect("motion", sad, opened, blobX, blobY, blobW, blobH) {
 		w.episode = true
 	}
 }
 
 func (w *CameraWorker) FakeMotion() {
-	w.enqueueDetect("fake", -1, true)
+	w.enqueueDetect("fake", -1, true, 0, 0, 0, 0)
 }

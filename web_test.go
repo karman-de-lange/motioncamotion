@@ -12,7 +12,7 @@ import (
 
 func TestWebIndexHasEventFilters(t *testing.T) {
 	html := webIndexHTML(nil)
-	for _, s := range []string{`id="alerts-filters"`, `id="motion-filters"`, "has_more", "Load older"} {
+	for _, s := range []string{`id="events-filters"`, `id="events-list"`, `data-tab="events"`, "Load older", `id="mask-editors"`} {
 		if !strings.Contains(html, s) {
 			t.Fatalf("missing %q", s)
 		}

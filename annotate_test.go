@@ -6,6 +6,16 @@ import (
 	"testing"
 )
 
+func TestMapThumbRectToStill(t *testing.T) {
+	x1, y1, x2, y2 := mapThumbRectToStill(0, 0, 16, 8, 1920, 1080)
+	if x1 != 0 || y1 != 0 {
+		t.Fatalf("origin %v,%v", x1, y1)
+	}
+	if x2 < 239 || x2 > 241 || y2 < 67 || y2 > 68 {
+		t.Fatalf("16x8 thumb -> still %v,%v %v,%v", x1, y1, x2, y2)
+	}
+}
+
 func TestMapDetsLetterboxToStill_1080p(t *testing.T) {
 	dets := []DetBox{{Class: "person", X1: 320, Y1: 140, X2: 400, Y2: 500}}
 	got := mapDetsLetterboxToStill(dets, 640, 640, 1920, 1080)

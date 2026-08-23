@@ -5,10 +5,10 @@
       "main": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/101",
       "motion_masks": [
         {
-          "h": 0.07,
-          "w": 0.28,
           "x": 0,
-          "y": 0
+          "y": 0,
+          "w": 0.34418839928057554,
+          "h": 0.060233018245768294
         }
       ],
       "motion_min_blob": 3,
@@ -22,10 +22,10 @@
       "main": "rtsp://homeassistant:Karman1122334455@10.3.1.50:554/Streaming/Channels/201",
       "motion_masks": [
         {
-          "h": 0.06,
-          "w": 0.28,
           "x": 0,
-          "y": 0
+          "y": 0,
+          "w": 0.3705373201438849,
+          "h": 0.044803803033633766
         }
       ],
       "motion_min_blob": 3,
@@ -40,10 +40,10 @@
       "motion_cooldown_sec": 3,
       "motion_masks": [
         {
-          "h": 0.06,
-          "w": 0.3,
           "x": 0.17,
-          "y": 0
+          "y": 0,
+          "w": 0.3,
+          "h": 0.06
         }
       ],
       "motion_min_blob": 3,
@@ -57,10 +57,10 @@
       "main": "rtsp://homeassistant:Karman1122334455@10.3.1.51:554/Streaming/Channels/101",
       "motion_masks": [
         {
-          "h": 0.06,
-          "w": 0.55,
-          "x": 0.02,
-          "y": 0.05
+          "x": 0.008149730215827338,
+          "y": 0.054943394152561005,
+          "w": 0.5924460431654677,
+          "h": 0.058350736425588044
         }
       ],
       "motion_min_blob": 3,
@@ -74,10 +74,10 @@
       "main": "rtsp://homeassistant:Karman1122334455@10.3.1.51:554/Streaming/Channels/301",
       "motion_masks": [
         {
-          "h": 0.04,
-          "w": 0.28,
-          "x": 0.02,
-          "y": 0.05
+          "x": 0,
+          "y": 0.05145361617938008,
+          "w": 0.3118929856115108,
+          "h": 0.04509232798417235
         }
       ],
       "motion_min_blob": 2,
@@ -91,10 +91,10 @@
       "main": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/201",
       "motion_masks": [
         {
-          "h": 0.06,
-          "w": 0.29,
           "x": 0.01,
-          "y": 0.04
+          "y": 0.04,
+          "w": 0.29,
+          "h": 0.06
         }
       ],
       "motion_min_blob": 2,
@@ -108,10 +108,10 @@
       "main": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/301",
       "motion_masks": [
         {
-          "h": 0.06,
-          "w": 0.3,
           "x": 0.01,
-          "y": 0.04
+          "y": 0.04,
+          "w": 0.3,
+          "h": 0.06
         }
       ],
       "motion_min_blob": 2,
@@ -125,10 +125,10 @@
       "main": "rtsp://homeassistant:Karman112233@10.3.2.150:554/Streaming/Channels/401",
       "motion_masks": [
         {
-          "h": 0.06,
-          "w": 0.3,
           "x": 0.01,
-          "y": 0.04
+          "y": 0.04,
+          "w": 0.3,
+          "h": 0.06
         }
       ],
       "motion_min_blob": 2,
@@ -143,10 +143,10 @@
       "motion_cooldown_sec": 0,
       "motion_masks": [
         {
-          "h": 0.06,
-          "w": 0.29,
           "x": 0.71,
-          "y": 0.03
+          "y": 0.03,
+          "w": 0.29,
+          "h": 0.06
         }
       ],
       "motion_min_blob": 3,
@@ -161,10 +161,10 @@
       "motion_cooldown_sec": 0,
       "motion_masks": [
         {
-          "h": 0.07,
-          "w": 0.28,
           "x": 0.71,
-          "y": 0.03
+          "y": 0.03,
+          "w": 0.28,
+          "h": 0.07
         }
       ],
       "motion_min_blob": 3,
@@ -179,10 +179,10 @@
       "motion_cooldown_sec": 0,
       "motion_masks": [
         {
-          "h": 0.06,
-          "w": 0.29,
           "x": 0.71,
-          "y": 0.03
+          "y": 0.03,
+          "w": 0.29,
+          "h": 0.06
         }
       ],
       "motion_min_blob": 3,

@@ -154,13 +154,17 @@ func motionHit(sad float64, blob, nCh, minBlob, needBlob int, minCompact float64
 	return true
 }
 
-// maxBlob returns the largest 4-connected region of changed cells.
 func maxBlob(changed []bool, w, h int) int {
+	n, _, _, _, _ := maxBlobBounds(changed, w, h)
+	return n
+}
+
+// maxBlobBounds is the largest 4-connected region and its inclusive cell box.
+func maxBlobBounds(changed []bool, w, h int) (size, x0, y0, x1, y1 int) {
 	if len(changed) != w*h {
-		return 0
+		return 0, 0, 0, 0, 0
 	}
 	seen := make([]bool, len(changed))
-	best := 0
 	var stack []int
 	for i := range changed {
 		if !changed[i] || seen[i] {
@@ -169,29 +173,41 @@ func maxBlob(changed []bool, w, h int) int {
 		stack = stack[:0]
 		stack = append(stack, i)
 		seen[i] = true
-		size := 0
+		n, minx, miny, maxx, maxy := 0, w, h, -1, -1
 		for len(stack) > 0 {
 			p := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			size++
+			n++
 			x, y := p%w, p/w
-			for _, n := range [4]int{p - 1, p + 1, p - w, p + w} {
-				if n < 0 || n >= len(changed) || seen[n] || !changed[n] {
+			if x < minx {
+				minx = x
+			}
+			if y < miny {
+				miny = y
+			}
+			if x > maxx {
+				maxx = x
+			}
+			if y > maxy {
+				maxy = y
+			}
+			for _, nb := range [4]int{p - 1, p + 1, p - w, p + w} {
+				if nb < 0 || nb >= len(changed) || seen[nb] || !changed[nb] {
 					continue
 				}
-				nx, ny := n%w, n/w
+				nx, ny := nb%w, nb/w
 				if abs(nx-x)+abs(ny-y) != 1 {
 					continue
 				}
-				seen[n] = true
-				stack = append(stack, n)
+				seen[nb] = true
+				stack = append(stack, nb)
 			}
 		}
-		if size > best {
-			best = size
+		if n > size {
+			size, x0, y0, x1, y1 = n, minx, miny, maxx, maxy
 		}
 	}
-	return best
+	return size, x0, y0, x1, y1
 }
 
 func abs(v int) int {

@@ -8,6 +8,10 @@ type DetectEvent struct {
 	Segments [][]byte
 	SAD      float64
 	Label    string
+	BlobX    int // thumb cells
+	BlobY    int
+	BlobW    int
+	BlobH    int
 }
 
 func eventMB(ev DetectEvent) float64 {

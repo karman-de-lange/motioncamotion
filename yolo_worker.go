@@ -174,9 +174,23 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 	stillRGB, stillW, stillH, _, stillOK := decodeRGBFitNearEnd(ev.Segments, stillMaxW, stillMaxH)
 	var stillPlain []byte
 	if stillOK {
-		stillPlain, _ = encodePreviewJPEG(stillRGB, stillW, stillH)
+		if boxes := motionBlobDet(ev, stillW, stillH); len(boxes) > 0 {
+			if jpg, err := AnnotateRGB(stillRGB, stillW, stillH, boxes, 90); err == nil {
+				stillPlain = jpg
+			}
+		}
+		if stillPlain == nil {
+			stillPlain, _ = encodePreviewJPEG(stillRGB, stillW, stillH)
+		}
 	} else if ok {
-		stillPlain, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
+		if boxes := motionBlobDet(ev, inferSize, inferSize); len(boxes) > 0 {
+			if jpg, err := AnnotateRGB(mainRGB, inferSize, inferSize, boxes, 90); err == nil {
+				stillPlain = jpg
+			}
+		}
+		if stillPlain == nil {
+			stillPlain, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
+		}
 	}
 
 	var clipRel string

@@ -200,6 +200,7 @@ func patchCameraSettings(path string, updates []camMotionSettings) error {
 		c["motion_min_blob"] = u.MotionMinBlob
 		c["motion_min_compact"] = u.MotionMinCompact
 		c["motion_sustain_frames"] = u.MotionSustainFrames
+		c["motion_masks"] = u.MotionMasks
 	}
 	raw, err := json.Marshal(cams)
 	if err != nil {

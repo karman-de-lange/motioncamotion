@@ -323,7 +323,7 @@ func (w *CameraWorker) runSubDecoded(
 		lastThumbAt = now
 
 		tRing.push(thumb)
-		sad, blob, nCh, ready := motionScoreTemporal(tRing, w.avgFrames, w.lagFrames, w.ignore, recentBuf, olderBuf)
+		sad, blob, nCh, ready, bx, by, bw, bh := motionScoreTemporal(tRing, w.avgFrames, w.lagFrames, w.ignoreMask(), recentBuf, olderBuf)
 		if !ready {
 			return
 		}
@@ -347,7 +347,7 @@ func (w *CameraWorker) runSubDecoded(
 				streak++
 			}
 			if streak >= w.sustainFrames {
-				w.fireMotion(sad)
+				w.fireMotion(sad, bx, by, bw, bh)
 				streak = 0
 			}
 		} else {
