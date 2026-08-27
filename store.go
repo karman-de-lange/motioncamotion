@@ -301,6 +301,7 @@ func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, 
 		stillPath := filepath.Join(dir, stillName)
 		if err := os.WriteFile(stillPath, stillJPEG, 0o644); err == nil {
 			rec.StillRel = filepath.ToSlash(filepath.Join("motion", day, stillName))
+			_, _ = ensureJPEGThumb(stillPath, jpegListThumbW)
 		}
 	}
 
@@ -315,9 +316,6 @@ func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, 
 // SaveAlert writes annotated still + metadata for a YOLO pass.
 // clipRel is the matching motion .h265.
 func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, topClass string, topScore float64, clipRel string) (EventRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	id := fmt.Sprintf("%s_%s_%d", ev.Cam, ev.At.Format("20060102_150405"), ev.At.UnixNano()%1e6)
 	day := ev.At.Format("20060102")
 	dir := filepath.Join(s.root, "alerts", day)
@@ -329,8 +327,7 @@ func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, 
 	if err := os.WriteFile(stillPath, stillJPEG, 0o644); err != nil {
 		return EventRecord{}, err
 	}
-	// sidecar meta
-	metaName := id + ".json"
+	_, _ = ensureJPEGThumb(stillPath, jpegListThumbW)
 	rec := EventRecord{
 		ID:        id,
 		Type:      "alert",
@@ -346,7 +343,10 @@ func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, 
 		MainClass: topClass,
 	}
 	mb, _ := json.MarshalIndent(rec, "", "  ")
-	_ = os.WriteFile(filepath.Join(dir, metaName), mb, 0o644)
+	_ = os.WriteFile(filepath.Join(dir, id+".json"), mb, 0o644)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.appendIndex(rec); err != nil {
 		return rec, err
 	}

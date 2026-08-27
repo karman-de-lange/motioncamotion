@@ -30,4 +30,8 @@ __pycache__/
 
 # optional large model (keep if you want it tracked — comment out to commit)
 # models/*.onnx
+# AGPL MegaDetector weights — do not commit
+models/mdv6*.onnx
+models/MDV6*.onnx
+models/*.pt
 media/

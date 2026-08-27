@@ -33,6 +33,18 @@ func TestMapDetsLetterboxToStill_1080p(t *testing.T) {
 	}
 }
 
+func TestFontGlyph_animalVehicleLetters(t *testing.T) {
+	block := fontGlyph('?')
+	for _, ch := range "animal vehicle person motion" {
+		if ch == ' ' {
+			continue
+		}
+		if fontGlyph(ch) == block {
+			t.Fatalf("glyph for %q is the unknown block", ch)
+		}
+	}
+}
+
 func TestAnnotateRGB_MultipleBoxes(t *testing.T) {
 	const w, h = 64, 64
 	rgb := make([]byte, w*h*3)

@@ -198,11 +198,14 @@ const webAppJS = `
     catch(e){ return ''; }
   }
   function media(rel){ return '/media/'+esc(rel); }
+  function mediaThumb(rel){ return '/media/'+esc(rel)+'?w=192'; }
+  function liveTabOn(){ return document.getElementById('tab-live').classList.contains('active'); }
+  function eventsTabOn(){ return document.getElementById('tab-events').classList.contains('active'); }
 
   function tick(img){
     var cam=img.getAttribute('data-cam'); if(!cam) return;
     if(img.getAttribute('data-busy')==='1') return;
-    if(document.hidden){ setTimeout(function(){tick(img);}, OK_MS); return; }
+    if(document.hidden || !liveTabOn()){ setTimeout(function(){tick(img);}, OK_MS); return; }
     var age=document.querySelector('[data-age="'+cam+'"]');
     img.setAttribute('data-busy','1');
     var probe=new Image();
@@ -231,9 +234,12 @@ const webAppJS = `
       btn.classList.add('active');
       document.getElementById('tab-'+btn.getAttribute('data-tab')).classList.add('active');
       if(btn.getAttribute('data-tab')==='settings') loadSettings();
-      if(btn.getAttribute('data-tab')==='events' && st.selected){
-        var e=st.rows.find(function(x){return x.id===st.selected;});
-        if(e) showDetail(e);
+      if(btn.getAttribute('data-tab')==='events'){
+        observeThumbs();
+        if(st.selected){
+          var e=st.rows.find(function(x){return x.id===st.selected;});
+          if(e) showDetail(e);
+        }
       }
     });
   });
@@ -334,7 +340,24 @@ const webAppJS = `
     for(var i=0;i<st.rows.length;i++) if(st.rows[i].id===e.id) return;
     st.rows.unshift(e);
     st.total+=1;
-    renderList();
+    var el=document.getElementById('events-list');
+    if(!el.querySelector('.ev')){ renderList(); return; }
+    var day=fmtDay(e.at);
+    var firstDay=el.querySelector('.day');
+    if(!firstDay || firstDay.textContent!==day){
+      var d=document.createElement('div');
+      d.className='day';
+      d.textContent=day;
+      el.insertBefore(d, el.firstChild);
+    }
+    var wrap=document.createElement('div');
+    wrap.innerHTML=evRowHTML(e);
+    var row=wrap.firstChild;
+    var anchor=el.querySelector('.day');
+    el.insertBefore(row, anchor?anchor.nextSibling:el.firstChild);
+    bindEvRow(row);
+    observeThumbs();
+    updateCount();
   }
 
   function detsLine(e){
@@ -344,13 +367,44 @@ const webAppJS = `
     return e.still ? 'Still' : 'Clip';
   }
 
+  function evRowHTML(e){
+    var thumb=e.still ? '<img class="ev-thumb" data-src="'+mediaThumb(e.still)+'" alt="">' : '<div class="ev-thumb-empty">—</div>';
+    return '<div class="ev'+(st.selected===e.id?' selected':'')+'" data-id="'+esc(e.id)+'">'
+      +thumb
+      +'<div class="ev-meta"><div class="ev-top"><span class="badge '+esc(e.type)+'">'+esc(e.type)+'</span> '+esc(e.cam)+'</div>'
+      +'<div class="ev-when">'+esc(fmtWhen(e.at))+'</div>'
+      +'<div class="ev-det">'+esc(detsLine(e))+'</div></div></div>';
+  }
+  function bindEvRow(row){
+    row.addEventListener('click', function(){ selectEvent(row.getAttribute('data-id')); });
+  }
+  function updateCount(){
+    var count=document.getElementById('evCount');
+    if(!count) return;
+    var shown=st.rows.length;
+    count.textContent=st.total ? (shown+' of '+st.total) : (shown? String(shown) : '');
+  }
+
+  var thumbIO=null;
+  function observeThumbs(){
+    var root=document.getElementById('events-list');
+    if(!root) return;
+    if(thumbIO) thumbIO.disconnect();
+    thumbIO=new IntersectionObserver(function(entries){
+      entries.forEach(function(en){
+        if(!en.isIntersecting) return;
+        var img=en.target;
+        var src=img.getAttribute('data-src');
+        if(src){ img.src=src; img.removeAttribute('data-src'); }
+        thumbIO.unobserve(img);
+      });
+    }, {root:root, rootMargin:'180px 0px'});
+    root.querySelectorAll('img.ev-thumb[data-src]').forEach(function(img){ thumbIO.observe(img); });
+  }
+
   function renderList(){
     var el=document.getElementById('events-list');
-    var count=document.getElementById('evCount');
-    if(count){
-      var shown=st.rows.length;
-      count.textContent=st.total ? (shown+' of '+st.total) : (shown? String(shown) : '');
-    }
+    updateCount();
     if(!st.rows.length){
       el.innerHTML='<div class="empty">'+(hasActiveFilters(readFilters())?'No events match.':'No events yet.')+'</div>';
       return;
@@ -359,20 +413,14 @@ const webAppJS = `
     st.rows.forEach(function(e){
       var day=fmtDay(e.at);
       if(day!==lastDay){ h+='<div class="day">'+esc(day)+'</div>'; lastDay=day; }
-      var thumb=e.still ? '<img class="ev-thumb" src="'+media(e.still)+'" alt="" loading="lazy">' : '<div class="ev-thumb-empty">—</div>';
-      h+='<div class="ev'+(st.selected===e.id?' selected':'')+'" data-id="'+esc(e.id)+'">'
-        +thumb
-        +'<div class="ev-meta"><div class="ev-top"><span class="badge '+esc(e.type)+'">'+esc(e.type)+'</span> '+esc(e.cam)+'</div>'
-        +'<div class="ev-when">'+esc(fmtWhen(e.at))+'</div>'
-        +'<div class="ev-det">'+esc(detsLine(e))+'</div></div></div>';
+      h+=evRowHTML(e);
     });
     if(st.hasMore) h+='<div class="more-wrap"><button type="button" class="btn" id="btnMore">Load older</button></div>';
     el.innerHTML=h;
-    el.querySelectorAll('.ev[data-id]').forEach(function(row){
-      row.addEventListener('click', function(){ selectEvent(row.getAttribute('data-id')); });
-    });
+    el.querySelectorAll('.ev[data-id]').forEach(bindEvRow);
     var more=document.getElementById('btnMore');
     if(more) more.addEventListener('click', function(){ loadEvents(false); });
+    if(eventsTabOn()) observeThumbs();
   }
 
   function selectEvent(id){
@@ -445,14 +493,14 @@ const webAppJS = `
     es.addEventListener('event', function(ev){
       try{
         var e=JSON.parse(ev.data);
-        refreshLiveRecent();
+        if(liveTabOn()) refreshLiveRecent();
         prependEvent(e);
         if(e.type==='alert'){
           banner.textContent='Alert · '+e.cam+' · '+(e.main_class||'object')+' '+(e.main_score||0).toFixed(2);
           banner.classList.add('show');
           toast.innerHTML='<div style="font-weight:650;margin-bottom:4px">Alert · '+esc(e.cam)+'</div>'
             +esc(e.main_class||'object')+' · '+(e.main_score||0).toFixed(2)
-            +(e.still?'<br><img src="'+media(e.still)+'" alt="">':'');
+            +(e.still?'<br><img src="'+mediaThumb(e.still)+'" alt="">':'');
           toast.classList.add('show');
           setTimeout(function(){ toast.classList.remove('show'); }, 8000);
           if(window.Notification && Notification.permission==='granted'){

@@ -131,6 +131,21 @@ func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, sto
 			http.NotFound(rw, r)
 			return
 		}
+		if wq := r.URL.Query().Get("w"); wq != "" {
+			n, err := strconv.Atoi(wq)
+			if err != nil || n != jpegListThumbW {
+				http.Error(rw, "bad w", http.StatusBadRequest)
+				return
+			}
+			thumb, err := ensureJPEGThumb(abs, n)
+			if err != nil {
+				http.Error(rw, "thumb", http.StatusNotFound)
+				return
+			}
+			rw.Header().Set("Cache-Control", "public, max-age=86400")
+			http.ServeFile(rw, r, thumb)
+			return
+		}
 		http.ServeFile(rw, r, abs)
 	})
 

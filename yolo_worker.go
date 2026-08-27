@@ -20,30 +20,6 @@ type yoloConfig struct {
 	MainConf float64
 }
 
-const smallDetH = inferSize / 8
-const smallDetConf = 0.65
-const stumpMaxAspect = 1.5
-
-func stumpGeom(w, h float64) bool {
-	return h < float64(smallDetH) && w > 0 && h < w*stumpMaxAspect
-}
-
-func filterDets(dets []DetBox, conf float64) []DetBox {
-	out := dets[:0]
-	for _, d := range dets {
-		h := d.Y2 - d.Y1
-		w := d.X2 - d.X1
-		if h <= 0 || w <= 0 || d.Score < conf {
-			continue
-		}
-		if stumpGeom(w, h) && d.Score < smallDetConf {
-			continue
-		}
-		out = append(out, d)
-	}
-	return out
-}
-
 var cocoNames = map[int]string{
 	0:  "person",
 	2:  "car",
@@ -214,7 +190,6 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 		logQ <- fmt.Sprintf("%s: infer error: %v", ev.Cam, err)
 		return
 	}
-	dets = filterDets(dets, yc.MainConf)
 	fresh := occ.consume(ev.Cam, dets, ev.At)
 	mainPass := len(fresh) > 0
 	topName := ""
@@ -234,7 +209,6 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 	}
 	logQ <- fmt.Sprintf("%s: main frames=%d infer=%.0fms pass=%v dets=%d fresh=%d score=%.2f %s",
 		ev.Cam, frames, mainMS, mainPass, len(dets), len(fresh), topScore, topName)
-	dets = fresh
 
 	annRGB, annW, annH := mainRGB, inferSize, inferSize
 	annDets := dets

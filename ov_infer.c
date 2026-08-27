@@ -78,6 +78,99 @@ static int nms_same_class(OVDet *dets, int n, float iou_thr) {
 	return keep;
 }
 
+static void sort_dets_desc(OVDet *dets, int n) {
+	for (int i = 1; i < n; i++) {
+		OVDet key = dets[i];
+		int j = i - 1;
+		while (j >= 0 && dets[j].score < key.score) {
+			dets[j + 1] = dets[j];
+			j--;
+		}
+		dets[j + 1] = key;
+	}
+}
+
+/* YOLOv8/v9: [1, 4+nc, N] cxcywh + class scores.
+ * YOLOv10 end2end: [1, N, 6] or [N, 6] = x1,y1,x2,y2,score,cls.
+ * only_cls < 0 means any wanted class. Returns count, or -1 if layout unknown. */
+static int collect_preds(const ov_shape_t *shape, const float *preds, float conf, int only_cls,
+                         OVDet *tmp, int cap) {
+	int ntmp = 0;
+	if (!shape || !preds || !tmp || cap <= 0) {
+		return 0;
+	}
+
+	if ((shape->rank == 2 && shape->dims[1] == 6) ||
+	    (shape->rank == 3 && shape->dims[2] == 6)) {
+		size_t n = shape->rank == 2 ? (size_t)shape->dims[0] : (size_t)shape->dims[1];
+		for (size_t i = 0; i < n && ntmp < cap; i++) {
+			const float *row = preds + i * 6;
+			int cls_id = (int)row[5];
+			float s = row[4];
+			if (s < conf) {
+				continue;
+			}
+			if (only_cls >= 0) {
+				if (cls_id != only_cls) {
+					continue;
+				}
+			} else if (!class_wanted(cls_id)) {
+				continue;
+			}
+			tmp[ntmp].score = s;
+			tmp[ntmp].class_id = cls_id;
+			tmp[ntmp].x1 = row[0];
+			tmp[ntmp].y1 = row[1];
+			tmp[ntmp].x2 = row[2];
+			tmp[ntmp].y2 = row[3];
+			ntmp++;
+		}
+		return ntmp;
+	}
+
+	if (shape->rank == 3 && shape->dims[1] >= 5) {
+		size_t channels = (size_t)shape->dims[1];
+		size_t num_det = (size_t)shape->dims[2];
+		for (size_t i = 0; i < num_det && ntmp < cap; i++) {
+			float cls_best = 0.0f;
+			int cls_id = -1;
+			if (only_cls >= 0) {
+				size_t ch = (size_t)4 + (size_t)only_cls;
+				if (ch >= channels) {
+					continue;
+				}
+				cls_best = preds[ch * num_det + i];
+				cls_id = only_cls;
+			} else {
+				for (size_t c = 4; c < channels; c++) {
+					float s = preds[c * num_det + i];
+					if (s > cls_best) {
+						cls_best = s;
+						cls_id = (int)(c - 4);
+					}
+				}
+			}
+			if (cls_best < conf || !class_wanted(cls_id)) {
+				continue;
+			}
+			float cx = preds[0 * num_det + i];
+			float cy = preds[1 * num_det + i];
+			float bw = preds[2 * num_det + i];
+			float bh = preds[3 * num_det + i];
+			tmp[ntmp].score = cls_best;
+			tmp[ntmp].class_id = cls_id;
+			tmp[ntmp].x1 = cx - bw * 0.5f;
+			tmp[ntmp].y1 = cy - bh * 0.5f;
+			tmp[ntmp].x2 = cx + bw * 0.5f;
+			tmp[ntmp].y2 = cy + bh * 0.5f;
+			ntmp++;
+		}
+		return ntmp;
+	}
+
+	return -1;
+}
+
 static void load_plugins(ov_core_t *core) {
 	/* Prefer env (user-local install); fall back to distro path. */
 	const char *dir = getenv("OPENVINO_LIB_DIR");
@@ -203,51 +296,33 @@ int ov_infer_run(OVInfer *inf, const uint8_t *rgb, float conf,
 	if (ov_tensor_get_shape(output, &shape) != OK) {
 		return -6;
 	}
-	if (shape.rank != 3 || shape.dims[1] < 5) {
-		ov_shape_free(&shape);
-		return -7;
-	}
-
 	void *output_data = NULL;
 	if (ov_tensor_data(output, &output_data) != OK) {
 		ov_shape_free(&shape);
 		return -8;
 	}
 
-	size_t channels = (size_t)shape.dims[1];
-	size_t num_det = (size_t)shape.dims[2];
-	float *preds = (float *)output_data;
+	OVDet tmp[OV_MAX_DETS * 4];
+	int ntmp = collect_preds(&shape, (float *)output_data, conf, -1, tmp,
+	                         (int)(sizeof(tmp) / sizeof(tmp[0])));
+	ov_shape_free(&shape);
+	if (ntmp < 0) {
+		return -7;
+	}
 
 	float best_score = 0.0f;
 	int best_cls = -1;
 	float best_x1 = 0, best_y1 = 0, best_x2 = 0, best_y2 = 0;
-	for (size_t i = 0; i < num_det; i++) {
-		float cls_best = 0.0f;
-		int cls_id = -1;
-		for (size_t c = 4; c < channels; c++) {
-			float s = preds[c * num_det + i];
-			if (s > cls_best) {
-				cls_best = s;
-				cls_id = (int)(c - 4);
-			}
-		}
-		if (cls_best < conf || !class_wanted(cls_id)) {
-			continue;
-		}
-		if (cls_best > best_score) {
-			float cx = preds[0 * num_det + i];
-			float cy = preds[1 * num_det + i];
-			float bw = preds[2 * num_det + i];
-			float bh = preds[3 * num_det + i];
-			best_score = cls_best;
-			best_cls = cls_id;
-			best_x1 = cx - bw * 0.5f;
-			best_y1 = cy - bh * 0.5f;
-			best_x2 = cx + bw * 0.5f;
-			best_y2 = cy + bh * 0.5f;
+	for (int i = 0; i < ntmp; i++) {
+		if (tmp[i].score > best_score) {
+			best_score = tmp[i].score;
+			best_cls = tmp[i].class_id;
+			best_x1 = tmp[i].x1;
+			best_y1 = tmp[i].y1;
+			best_x2 = tmp[i].x2;
+			best_y2 = tmp[i].y2;
 		}
 	}
-	ov_shape_free(&shape);
 
 	*out_ms = (float)(t1.tv_sec - t0.tv_sec) * 1000.0f +
 	          (float)(t1.tv_nsec - t0.tv_nsec) / 1000000.0f;
@@ -277,25 +352,6 @@ static int infer_once(OVInfer *inf, const uint8_t *rgb) {
 	return 0;
 }
 
-static void scan_preds(float *preds, size_t channels, size_t num_det, float *by_cls) {
-	for (int k = 0; k < 3; k++) {
-		by_cls[k] = 0.0f;
-	}
-	for (size_t i = 0; i < num_det; i++) {
-		for (size_t c = 4; c < channels; c++) {
-			int cls_id = (int)(c - 4);
-			float s = preds[c * num_det + i];
-			if (cls_id == 0 && s > by_cls[0]) {
-				by_cls[0] = s;
-			} else if (cls_id == 2 && s > by_cls[1]) {
-				by_cls[1] = s;
-			} else if (cls_id == 15 && s > by_cls[2]) {
-				by_cls[2] = s;
-			}
-		}
-	}
-}
-
 int ov_infer_class_scores(OVInfer *inf, const uint8_t *rgb,
                           float *person, float *car, float *cat) {
 	if (!inf || !rgb || !person || !car || !cat) {
@@ -311,7 +367,7 @@ int ov_infer_class_scores(OVInfer *inf, const uint8_t *rgb,
 		return -5;
 	}
 	ov_shape_t shape = {.rank = 0, .dims = NULL};
-	if (ov_tensor_get_shape(output, &shape) != OK || shape.rank != 3) {
+	if (ov_tensor_get_shape(output, &shape) != OK) {
 		ov_shape_free(&shape);
 		return -6;
 	}
@@ -321,12 +377,27 @@ int ov_infer_class_scores(OVInfer *inf, const uint8_t *rgb,
 		return -7;
 	}
 
-	float scores[3];
-	scan_preds((float *)output_data, (size_t)shape.dims[1], (size_t)shape.dims[2], scores);
+	OVDet tmp[OV_MAX_DETS * 4];
+	int ntmp = collect_preds(&shape, (float *)output_data, 0.0f, -1, tmp,
+	                         (int)(sizeof(tmp) / sizeof(tmp[0])));
 	ov_shape_free(&shape);
-	*person = scores[0];
-	*car = scores[1];
-	*cat = scores[2];
+	if (ntmp < 0) {
+		return -6;
+	}
+
+	float p = 0, v = 0, a = 0;
+	for (int i = 0; i < ntmp; i++) {
+		if (tmp[i].class_id == 0 && tmp[i].score > p) {
+			p = tmp[i].score;
+		} else if (tmp[i].class_id == 2 && tmp[i].score > v) {
+			v = tmp[i].score;
+		} else if (tmp[i].class_id == 15 && tmp[i].score > a) {
+			a = tmp[i].score;
+		}
+	}
+	*person = p;
+	*car = v;
+	*cat = a;
 	return 0;
 }
 
@@ -348,7 +419,7 @@ int ov_infer_best_for_class(OVInfer *inf, const uint8_t *rgb, int class_id,
 		return -3;
 	}
 	ov_shape_t shape = {.rank = 0, .dims = NULL};
-	if (ov_tensor_get_shape(output, &shape) != OK || shape.rank != 3) {
+	if (ov_tensor_get_shape(output, &shape) != OK) {
 		ov_shape_free(&shape);
 		return -4;
 	}
@@ -358,28 +429,25 @@ int ov_infer_best_for_class(OVInfer *inf, const uint8_t *rgb, int class_id,
 		return -5;
 	}
 
-	size_t channels = (size_t)shape.dims[1];
-	size_t num_det = (size_t)shape.dims[2];
-	float *preds = (float *)output_data;
+	OVDet tmp[OV_MAX_DETS * 4];
+	int ntmp = collect_preds(&shape, (float *)output_data, 0.0f, class_id, tmp,
+	                         (int)(sizeof(tmp) / sizeof(tmp[0])));
+	ov_shape_free(&shape);
+	if (ntmp < 0) {
+		return -4;
+	}
 
 	float best_score = 0.0f;
 	float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-	for (size_t i = 0; i < num_det; i++) {
-		float s = preds[((size_t)4 + class_id) * num_det + i];
-		if (s <= best_score) {
-			continue;
+	for (int i = 0; i < ntmp; i++) {
+		if (tmp[i].score > best_score) {
+			best_score = tmp[i].score;
+			x1 = tmp[i].x1;
+			y1 = tmp[i].y1;
+			x2 = tmp[i].x2;
+			y2 = tmp[i].y2;
 		}
-		float cx = preds[0 * num_det + i];
-		float cy = preds[1 * num_det + i];
-		float bw = preds[2 * num_det + i];
-		float bh = preds[3 * num_det + i];
-		best_score = s;
-		x1 = cx - bw * 0.5f;
-		y1 = cy - bh * 0.5f;
-		x2 = cx + bw * 0.5f;
-		y2 = cy + bh * 0.5f;
 	}
-	ov_shape_free(&shape);
 
 	if (best_score <= 0.0f) {
 		return 1;
@@ -424,61 +492,21 @@ int ov_infer_run_multi(OVInfer *inf, const uint8_t *rgb, float conf,
 	if (ov_tensor_get_shape(output, &shape) != OK) {
 		return -6;
 	}
-	if (shape.rank != 3 || shape.dims[1] < 5) {
-		ov_shape_free(&shape);
-		return -7;
-	}
 	void *output_data = NULL;
 	if (ov_tensor_data(output, &output_data) != OK) {
 		ov_shape_free(&shape);
 		return -8;
 	}
 
-	size_t channels = (size_t)shape.dims[1];
-	size_t num_det = (size_t)shape.dims[2];
-	float *preds = (float *)output_data;
-
-	/* Collect then partial-sort by score (insertion for small N). */
 	OVDet tmp[OV_MAX_DETS * 4];
-	int ntmp = 0;
-	int cap_tmp = (int)(sizeof(tmp) / sizeof(tmp[0]));
-	for (size_t i = 0; i < num_det; i++) {
-		float cls_best = 0.0f;
-		int cls_id = -1;
-		for (size_t c = 4; c < channels; c++) {
-			float s = preds[c * num_det + i];
-			if (s > cls_best) {
-				cls_best = s;
-				cls_id = (int)(c - 4);
-			}
-		}
-		if (cls_best < conf || !class_wanted(cls_id) || ntmp >= cap_tmp) {
-			continue;
-		}
-		float cx = preds[0 * num_det + i];
-		float cy = preds[1 * num_det + i];
-		float bw = preds[2 * num_det + i];
-		float bh = preds[3 * num_det + i];
-		tmp[ntmp].score = cls_best;
-		tmp[ntmp].class_id = cls_id;
-		tmp[ntmp].x1 = cx - bw * 0.5f;
-		tmp[ntmp].y1 = cy - bh * 0.5f;
-		tmp[ntmp].x2 = cx + bw * 0.5f;
-		tmp[ntmp].y2 = cy + bh * 0.5f;
-		ntmp++;
-	}
+	int ntmp = collect_preds(&shape, (float *)output_data, conf, -1, tmp,
+	                         (int)(sizeof(tmp) / sizeof(tmp[0])));
 	ov_shape_free(&shape);
-
-	for (int i = 1; i < ntmp; i++) {
-		OVDet key = tmp[i];
-		int j = i - 1;
-		while (j >= 0 && tmp[j].score < key.score) {
-			tmp[j + 1] = tmp[j];
-			j--;
-		}
-		tmp[j + 1] = key;
+	if (ntmp < 0) {
+		return -7;
 	}
 
+	sort_dets_desc(tmp, ntmp);
 	ntmp = nms_same_class(tmp, ntmp, 0.45f);
 	int n = ntmp < max_dets ? ntmp : max_dets;
 	for (int i = 0; i < n; i++) {

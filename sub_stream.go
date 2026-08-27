@@ -280,7 +280,9 @@ func (w *CameraWorker) runSubDecoded(
 				}
 			}
 			wait := now.Sub(lastRecreate)
-			stalled := moreDataStreak >= moreDataStallN
+			// MORE_DATA before the first thumb is H.264 GOP warmup (Imou 2–4s).
+			// Recreating at 45 AUs (~3s) throws the decoder away before the IDR.
+			stalled := liveOK && moreDataStreak >= moreDataStallN
 			if liveOK && rc != DecMoreData && rc != DecOK {
 				stalled = true
 			}

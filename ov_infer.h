@@ -10,14 +10,14 @@ int ov_infer_new(OVInfer **out, const char *model_path, const char *device, int 
 
 void ov_infer_free(OVInfer *inf);
 
-/* Wanted classes: person/car/bus/truck + COCO animals 14–23. bbox in model pixels. */
+/* Wanted classes: person/car/bus/truck + COCO animals 14–19. bbox in model pixels. */
 int ov_infer_run(OVInfer *inf, const uint8_t *rgb, float conf,
                  float *out_ms, int *out_pass, float *out_score, int *out_class,
                  float *out_x1, float *out_y1, float *out_x2, float *out_y2);
 
 const char *ov_infer_device(OVInfer *inf);
 
-/* Best score per wanted class (0=person,2=car,15=cat), regardless of conf. */
+/* Best score per wanted class (0=person, 2=car, 15=cat), regardless of conf. */
 int ov_infer_class_scores(OVInfer *inf, const uint8_t *rgb,
                           float *person, float *car, float *cat);
 
