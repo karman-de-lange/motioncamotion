@@ -39,7 +39,7 @@ func TestOccupancy_parkedCarNeedsNegativeObserve(t *testing.T) {
 	}
 	// Another vehicle elsewhere for N looks → this track is gone.
 	other := []DetBox{{Class: "car", ClassID: 2, Score: 0.7, X1: 10, Y1: 10, X2: 40, Y2: 40}}
-	for i := 0; i < occGoneSamples; i++ {
+	for i := 0; i < occVehicleGoneSamples; i++ {
 		o.consume("hik2", other, now.Add(time.Duration(31+i)*time.Minute))
 	}
 	if n := o.consume("hik2", car, now.Add(40*time.Minute)); len(n) != 1 {
@@ -84,6 +84,69 @@ func TestOccupancy_twoPeopleSideBySide(t *testing.T) {
 	fresh := o.consume("hik1", dets, now)
 	if len(fresh) != 2 {
 		t.Fatalf("two full-height people both fresh, got %d", len(fresh))
+	}
+}
+
+func TestOccupancy_twoParkedMissOneDoesNotReAlert(t *testing.T) {
+	o := newOccupancy()
+	now := time.Now()
+	bus := DetBox{Class: "bus", ClassID: 5, Score: 0.83, X1: 371, Y1: 311, X2: 518, Y2: 381}
+	truck := DetBox{Class: "truck", ClassID: 7, Score: 0.61, X1: 60, Y1: 301, X2: 155, Y2: 381}
+	if n := o.consume("cam118", []DetBox{bus, truck}, now); len(n) != 2 {
+		t.Fatalf("first look both fresh, got %d", len(n))
+	}
+	// YOLO only returns the bus for a long burst (cam118 22:54–22:55).
+	for i := 0; i < 20; i++ {
+		fresh := o.consume("cam118", []DetBox{bus}, now.Add(time.Duration(i+1)*time.Second))
+		if len(fresh) != 0 {
+			t.Fatalf("bus-only look %d re-alerted: %+v", i, fresh)
+		}
+	}
+	car := DetBox{Class: "car", ClassID: 2, Score: 0.46, X1: 66, Y1: 301, X2: 152, Y2: 380}
+	if n := o.consume("cam118", []DetBox{bus, car}, now.Add(30*time.Second)); len(n) != 0 {
+		t.Fatalf("left wreck as car after misses re-alerted: %+v", n)
+	}
+}
+
+func TestOccupancy_personWalksInBesideParkedCar(t *testing.T) {
+	o := newOccupancy()
+	now := time.Now()
+	truck := DetBox{Class: "truck", ClassID: 7, Score: 0.67, X1: 360, Y1: 278, X2: 619, Y2: 396}
+	if n := o.consume("hik2", []DetBox{truck}, now); len(n) != 1 {
+		t.Fatalf("first truck: %d", len(n))
+	}
+	// Person overlapping the bakkie must still alert.
+	person := DetBox{Class: "person", ClassID: 0, Score: 0.72, X1: 400, Y1: 250, X2: 470, Y2: 420}
+	fresh := o.consume("hik2", []DetBox{truck, person}, now.Add(time.Second))
+	if len(fresh) != 1 || fresh[0].ClassID != 0 {
+		t.Fatalf("walk-in beside parked truck want person, got %+v", fresh)
+	}
+	fresh = o.consume("hik2", []DetBox{truck, person}, now.Add(2*time.Second))
+	if len(fresh) != 0 {
+		t.Fatalf("same person still in frame should not re-alert: %+v", fresh)
+	}
+	animal := DetBox{Class: "animal", ClassID: 15, Score: 0.55, X1: 80, Y1: 360, X2: 120, Y2: 400}
+	fresh = o.consume("hik2", []DetBox{truck, person, animal}, now.Add(3*time.Second))
+	if len(fresh) != 1 || fresh[0].ClassID != 15 {
+		t.Fatalf("cat beside parked truck want animal, got %+v", fresh)
+	}
+}
+
+func TestOccupancy_parkedTruckAsCarIsSame(t *testing.T) {
+	o := newOccupancy()
+	now := time.Now()
+	truck := []DetBox{{Class: "truck", ClassID: 7, Score: 0.67, X1: 360, Y1: 278, X2: 619, Y2: 396}}
+	if n := o.consume("hik2", truck, now); len(n) != 1 {
+		t.Fatalf("first truck: %d", len(n))
+	}
+	car := []DetBox{{Class: "car", ClassID: 2, Score: 0.52, X1: 155, Y1: 347, X2: 628, Y2: 497}}
+	// Huge overlapping "car" on the same bakkie must not re-alert.
+	both := []DetBox{truck[0], car[0]}
+	if n := o.consume("hik2", both, now.Add(time.Second)); len(n) != 0 {
+		t.Fatalf("truck+car same bakkie re-alerted: %d", len(n))
+	}
+	if n := o.consume("hik2", car, now.Add(2*time.Second)); len(n) != 0 {
+		t.Fatalf("class flip truck→car re-alerted: %d", len(n))
 	}
 }
 

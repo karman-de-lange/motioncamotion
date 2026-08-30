@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"os"
 	"testing"
 	"time"
 )
@@ -64,7 +66,7 @@ func TestFireMotion_emptyRingDoesNotLatchEpisode(t *testing.T) {
 		t.Fatal("marked without segments")
 	}
 	assertAdmitIdle(t, w.adm)
-	w.ring.push([]byte("au"))
+	w.ring.push(fakeHEVCKeyframe())
 	w.fireMotion(4, 0, 0, 0, 0)
 	ev, opened, ok := w.adm.pull()
 	if !ok {
@@ -86,7 +88,7 @@ func TestEnqueueDetect_emptyRingNoMark(t *testing.T) {
 	}
 	assertAdmitIdle(t, w.adm)
 	w.adm.perCam = 1
-	w.ring.push([]byte("au"))
+	w.ring.push(fakeHEVCKeyframe())
 	if !w.enqueueDetect("motion", 2, false, 0, 0, 0, 0) {
 		t.Fatal("extra after released empty-ring hold")
 	}
@@ -99,7 +101,7 @@ func TestEnqueueDetect_emptyRingNoMark(t *testing.T) {
 func TestEnqueueDetect_queuesMultiple(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
 	w.adm = newAdmissions()
-	w.ring.push([]byte("au"))
+	w.ring.push(fakeHEVCKeyframe())
 	if !w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
 		t.Fatal("first")
 	}
@@ -120,7 +122,7 @@ func TestEnqueueDetect_overwriteKeepsLatest(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
 	w.adm = newAdmissions()
 	w.adm.perCam = 1
-	w.ring.push([]byte("au"))
+	w.ring.push(fakeHEVCKeyframe())
 	if !w.enqueueDetect("motion", 1, false, 0, 0, 0, 0) {
 		t.Fatal("first extra")
 	}
@@ -141,7 +143,7 @@ func TestEnqueueDetect_openNeverSkipped(t *testing.T) {
 	w.adm = newAdmissions()
 	w.adm.perCam = 1
 	w.adm.cap = 1
-	w.ring.push([]byte("au"))
+	w.ring.push(fakeHEVCKeyframe())
 	if !w.enqueueDetect("motion", 1, false, 0, 0, 0, 0) {
 		t.Fatal("extra")
 	}
@@ -167,7 +169,7 @@ func TestEnqueueDetect_skipDoesNotSnapshot(t *testing.T) {
 	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
 	w.adm = newAdmissions()
 	w.adm.perCam = 1
-	w.ring.push([]byte("au"))
+	w.ring.push(fakeHEVCKeyframe())
 	if !w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
 		t.Fatal("open")
 	}
@@ -179,6 +181,44 @@ func TestEnqueueDetect_skipDoesNotSnapshot(t *testing.T) {
 	if n != 0 {
 		t.Fatal("snapshot on drop path")
 	}
+}
+
+func TestEnqueueDetect_copiesGOPNotTimeWindow(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions()
+	idr := fakeHEVCKeyframe()
+	p := fakePFrame()
+	w.ring.push(idr)
+	w.ring.push(p)
+	w.ring.push(p)
+	w.ring.push(idr)
+	w.ring.push(p)
+	if !w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
+		t.Fatal("enqueue")
+	}
+	ev, _, ok := w.adm.pull()
+	if !ok {
+		t.Fatal("missing job")
+	}
+	if len(ev.Segments) != 2 {
+		t.Fatalf("want GOP 2 aus, got %d (10s dump?)", len(ev.Segments))
+	}
+	if !bytes.Equal(ev.Segments[0], idr) || !bytes.Equal(ev.Segments[1], p) {
+		t.Fatal("job is not last keyframe→newest")
+	}
+}
+
+func TestEnqueueDetect_noKeyframeNoMark(t *testing.T) {
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions()
+	w.ring.push(fakePFrame())
+	if w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
+		t.Fatal("P-only ring reported mark")
+	}
+	if _, _, ok := w.adm.pull(); ok {
+		t.Fatal("marked without keyframe")
+	}
+	assertAdmitIdle(t, w.adm)
 }
 
 func TestApplyMotion_updatesGates(t *testing.T) {
@@ -512,5 +552,131 @@ func TestStreamWith_clearsEpisode(t *testing.T) {
 	waitDone(t, done, "streamWith blocked")
 	if w.episode {
 		t.Fatal("episode still set after stream session start")
+	}
+}
+
+func TestWriteAlertClip_preThenPost(t *testing.T) {
+	oldPre, oldPost := clipPreDur, clipPostDur
+	clipPreDur = 40 * time.Millisecond
+	clipPostDur = 40 * time.Millisecond
+	defer func() {
+		clipPreDur, clipPostDur = oldPre, oldPost
+	}()
+
+	store, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	pre := append(fakeHEVCKeyframe(), []byte("PREDATA")...)
+	post := append(fakeHEVCKeyframe(), []byte("POSTDATA")...)
+	w.ring.push(pre)
+	at := time.Now()
+	rel := "alerts/20260829/prepost.h265"
+	abs, err := store.AbsMedia(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preDone := make(chan struct{})
+	release := make(chan struct{})
+	w.afterClipPre = func() {
+		close(preDone)
+		<-release
+	}
+	done := make(chan struct{})
+	go func() {
+		w.writeAlertClip(store, rel, at)
+		close(done)
+	}()
+	waitDone(t, preDone, "pre-roll not written")
+	first, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(first, []byte("PREDATA")) {
+		t.Fatal("missing pre-roll in first write")
+	}
+	if bytes.Contains(first, []byte("POSTDATA")) {
+		t.Fatal("post-roll present before wait")
+	}
+	w.ring.push(post)
+	close(release)
+	waitDone(t, done, "writeAlertClip did not finish")
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("PREDATA")) {
+		t.Fatal("missing pre-roll")
+	}
+	if !bytes.Contains(data, []byte("POSTDATA")) {
+		t.Fatal("missing post-roll")
+	}
+}
+
+func TestWriteAlertClip_reconnectKeepsPreRoll(t *testing.T) {
+	oldPre, oldPost := clipPreDur, clipPostDur
+	clipPreDur = 40 * time.Millisecond
+	clipPostDur = 40 * time.Millisecond
+	defer func() {
+		clipPreDur, clipPostDur = oldPre, oldPost
+	}()
+
+	store, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	pre := append(fakeHEVCKeyframe(), []byte("PREDATA")...)
+	w.ring.push(pre)
+	at := time.Now()
+	rel := "alerts/20260829/keep.h265"
+	abs, err := store.AbsMedia(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preDone := make(chan struct{})
+	release := make(chan struct{})
+	w.afterClipPre = func() {
+		close(preDone)
+		<-release
+	}
+	done := make(chan struct{})
+	go func() {
+		w.writeAlertClip(store, rel, at)
+		close(done)
+	}()
+	waitDone(t, preDone, "pre-roll not written")
+	w.ring.clear()
+	w.ring.push(append(fakeHEVCKeyframe(), []byte("NEWDATA")...))
+	close(release)
+	waitDone(t, done, "writeAlertClip did not finish")
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("PREDATA")) {
+		t.Fatal("pre-roll replaced after reconnect")
+	}
+	if bytes.Contains(data, []byte("NEWDATA")) {
+		t.Fatal("post-reconnect dump overwrote pre-roll")
+	}
+}
+
+func TestWriteAlertClip_emptyRingNoLog(t *testing.T) {
+	oldPost := clipPostDur
+	clipPostDur = 0
+	defer func() { clipPostDur = oldPost }()
+	logQ := make(chan string, 4)
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, logQ)
+	store, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.writeAlertClip(store, "alerts/20260829/empty.h265", time.Now())
+	select {
+	case msg := <-logQ:
+		t.Fatalf("logged %q on empty ring", msg)
+	default:
 	}
 }

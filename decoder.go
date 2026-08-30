@@ -37,27 +37,32 @@ type FrameDecoder interface {
 	Close()
 }
 
+var openFrameDecoder = newFrameDecoder
+
 // NewFrameDecoder creates a backend decoder for codec (CodecHEVC or CodecAVC).
 // rc != 0 means init failed; d is nil.
 // Backend is selected at build time (see decoder_vpl.go / decoder_nvdec.go).
 func NewFrameDecoder(codec int) (d FrameDecoder, rc int) {
-	return newFrameDecoder(codec)
+	return openFrameDecoder(codec)
 }
 
-// decodeRGBNearEnd starts at the last IRAP and returns the last usable RGB.
 func decodeRGBNearEnd(segments [][]byte, outW, outH int) ([]byte, int, bool) {
 	dec, rc := NewFrameDecoder(CodecHEVC)
 	if rc != 0 || dec == nil {
 		return nil, 0, false
 	}
 	defer dec.Close()
-	return decodeRGBNearEndWith(dec, segments, outW, outH)
+	return decodeRGBFeedWith(dec, segments, outW, outH)
 }
 
 func decodeRGBNearEndWith(dec FrameDecoder, segments [][]byte, outW, outH int) ([]byte, int, bool) {
 	if start := lastIRAPIndex(segments); start > 0 {
 		segments = segments[start:]
 	}
+	return decodeRGBFeedWith(dec, segments, outW, outH)
+}
+
+func decodeRGBFeedWith(dec FrameDecoder, segments [][]byte, outW, outH int) ([]byte, int, bool) {
 	rgb := make([]byte, outW*outH*3)
 	last := make([]byte, outW*outH*3)
 	frames := 0

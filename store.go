@@ -269,21 +269,11 @@ func (s *EventStore) queryEvents(q eventQuery) eventPage {
 	return page
 }
 
-// SaveMotion writes h265 clip (+ optional still jpeg + browser MP4) and indexes a motion event.
 func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, error) {
 	id := fmt.Sprintf("%s_%s_%d", ev.Cam, ev.At.Format("20060102_150405"), ev.At.UnixNano()%1e6)
 	day := ev.At.Format("20060102")
 	dir := filepath.Join(s.root, "motion", day)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return EventRecord{}, err
-	}
-	clipName := id + ".h265"
-	clipPath := filepath.Join(dir, clipName)
-	data := buildClipBitstream(ev.Segments)
-	if len(data) == 0 {
-		return EventRecord{}, fmt.Errorf("empty clip")
-	}
-	if err := os.WriteFile(clipPath, data, 0o644); err != nil {
 		return EventRecord{}, err
 	}
 	rec := EventRecord{
@@ -294,7 +284,7 @@ func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, 
 		Label:   ev.Label,
 		SAD:     ev.SAD,
 		Pass:    false,
-		ClipRel: filepath.ToSlash(filepath.Join("motion", day, clipName)),
+		ClipRel: filepath.ToSlash(filepath.Join("motion", day, id+".h265")),
 	}
 	if len(stillJPEG) > 0 {
 		stillName := id + ".jpg"
@@ -313,8 +303,24 @@ func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, 
 	return rec, nil
 }
 
-// SaveAlert writes annotated still + metadata for a YOLO pass.
-// clipRel is the matching motion .h265.
+func (s *EventStore) WriteClipAt(rel string, segments [][]byte) error {
+	if s == nil || rel == "" {
+		return fmt.Errorf("empty clip path")
+	}
+	data := buildClipBitstream(segments)
+	if len(data) == 0 {
+		return fmt.Errorf("empty clip")
+	}
+	abs, err := s.AbsMedia(rel)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(abs, data, 0o644)
+}
+
 func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, topClass string, topScore float64, clipRel string) (EventRecord, error) {
 	id := fmt.Sprintf("%s_%s_%d", ev.Cam, ev.At.Format("20060102_150405"), ev.At.UnixNano()%1e6)
 	day := ev.At.Format("20060102")
@@ -328,6 +334,9 @@ func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, 
 		return EventRecord{}, err
 	}
 	_, _ = ensureJPEGThumb(stillPath, jpegListThumbW)
+	if clipRel == "" {
+		clipRel = filepath.ToSlash(filepath.Join("alerts", day, id+".h265"))
+	}
 	rec := EventRecord{
 		ID:        id,
 		Type:      "alert",

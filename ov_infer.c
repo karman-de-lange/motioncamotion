@@ -1,6 +1,7 @@
 #include "ov_infer.h"
 
 #include <openvino/c/openvino.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,9 +28,9 @@ static void rgb_to_nchw_f32(const uint8_t *rgb, int w, int h, float *dst) {
 }
 
 static int class_wanted(int cls) {
-	/* person, car, bus, truck + bird/cat/dog/horse/sheep/cow as "animal".
+	/* person, bicycle, car, motorcycle, bus, truck + bird/cat/dog/horse/sheep/cow.
 	 * Skip elephant/bear/zebra/giraffe — chairs and tarps map onto those. */
-	return cls == 0 || cls == 2 || cls == 5 || cls == 7 ||
+	return cls == 0 || cls == 1 || cls == 2 || cls == 3 || cls == 5 || cls == 7 ||
 	       (cls >= 14 && cls <= 19);
 }
 
@@ -107,7 +108,7 @@ static int collect_preds(const ov_shape_t *shape, const float *preds, float conf
 			const float *row = preds + i * 6;
 			int cls_id = (int)row[5];
 			float s = row[4];
-			if (s < conf) {
+			if (!isfinite(s) || s < conf) {
 				continue;
 			}
 			if (only_cls >= 0) {
@@ -150,7 +151,7 @@ static int collect_preds(const ov_shape_t *shape, const float *preds, float conf
 					}
 				}
 			}
-			if (cls_best < conf || !class_wanted(cls_id)) {
+			if (!isfinite(cls_best) || cls_best < conf || !class_wanted(cls_id)) {
 				continue;
 			}
 			float cx = preds[0 * num_det + i];
@@ -196,7 +197,15 @@ static int compile_model(const char *model_path, const char *device, OVInfer *in
 	load_plugins(core);
 
 	ov_compiled_model_t *compiled = NULL;
-	ov_status_e st = ov_core_compile_model_from_file(core, model_path, device, 0, &compiled);
+	ov_status_e st;
+	if (strcmp(device, "GPU") == 0) {
+		/* Intel GPU defaults to f16. yolo26s end2end/DFL overflows: every box
+		 * comes back score=1.0 with garbage coords. Force f32. */
+		st = ov_core_compile_model_from_file(core, model_path, device, 2, &compiled,
+		                                    ov_property_key_hint_inference_precision, "f32");
+	} else {
+		st = ov_core_compile_model_from_file(core, model_path, device, 0, &compiled);
+	}
 	ov_core_free(core);
 	if (st != OK) {
 		return (int)st;

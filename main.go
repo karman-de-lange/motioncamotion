@@ -283,7 +283,7 @@ func main() {
 	}()
 
 	yc := yoloConfig{MainConf: cfg.MainConf}
-	go runYOLOWorker(ctx, adm, logQ, store, inf, yc)
+	clipper := &alertClipper{store: store}
 
 	workers := make([]*CameraWorker, len(cfg.Cameras))
 	for i, cam := range cfg.Cameras {
@@ -292,8 +292,10 @@ func main() {
 		}
 		workers[i] = NewCameraWorker(cam, sadCutoff, maxBuf, cfg.MotionSustainFrames, cfg.MotionMinBlob, cfg.MotionAvgFrames, cfg.MotionLagFrames, logQ)
 		workers[i].adm = adm
+		clipper.register(workers[i])
 		go workers[i].Run(ctx)
 	}
+	go runYOLOWorker(ctx, adm, logQ, store, inf, yc, clipper.capture)
 
 	if cfg.PreviewAddr != "" && cfg.PreviewAddr != "off" {
 		go runWebServer(ctx, cfg.PreviewAddr, workers, store, logQ, cfg.TLSDomain, cfg.TLSEmail, cfg.TLSCert, cfg.TLSKey, cfgPath)

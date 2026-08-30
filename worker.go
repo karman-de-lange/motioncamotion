@@ -16,12 +16,14 @@ import (
 	"github.com/pion/rtp"
 )
 
-const (
-	// Pre-trigger main-ring slice written on motion (wall-clock AU timestamps).
-	snapshotDur = 10 * time.Second
-	// Keep more than snapshot so the window is full when motion fires.
-	ringKeepDur = 20 * time.Second
+var (
+	clipPreDur  = 30 * time.Second
+	clipPostDur = 30 * time.Second
 )
+
+func ringKeepDur() time.Duration {
+	return clipPreDur + clipPostDur
+}
 
 type CameraWorker struct {
 	cfg           Camera
@@ -45,6 +47,7 @@ type CameraWorker struct {
 	previewJPEG      []byte
 	previewJPEGAt    time.Time
 	afterLookseeCopy func() // test hook: runs after snapshot, before decode
+	afterClipPre     func()
 	adm              *admissions
 	episode          bool
 
@@ -465,7 +468,7 @@ func (w *CameraWorker) runMain(ctx context.Context) {
 	for {
 		select {
 		case <-trim.C:
-			w.ring.trim(ringKeepDur)
+			w.ring.trim(ringKeepDur())
 		case <-done:
 			return
 		}
@@ -484,10 +487,7 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool, blo
 		}
 		h = oh
 	}
-	segments := w.ring.snapshot(snapshotDur)
-	if len(segments) == 0 {
-		segments = w.ring.snapshot(ringKeepDur)
-	}
+	segments := w.ring.snapshotGOP()
 	if len(segments) == 0 {
 		if w.adm != nil {
 			w.adm.release(h)
@@ -527,6 +527,74 @@ func (w *CameraWorker) fireMotion(sad float64, blobX, blobY, blobW, blobH int) {
 	opened := !w.episode
 	if w.enqueueDetect("motion", sad, opened, blobX, blobY, blobW, blobH) {
 		w.episode = true
+	}
+}
+
+type alertClipper struct {
+	mu     sync.Mutex
+	store  *EventStore
+	byName map[string]*CameraWorker
+}
+
+func (c *alertClipper) register(w *CameraWorker) {
+	if c == nil || w == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.byName == nil {
+		c.byName = make(map[string]*CameraWorker)
+	}
+	c.byName[w.cfg.Name] = w
+	c.mu.Unlock()
+}
+
+func (c *alertClipper) capture(cam, rel string, at time.Time) {
+	if c == nil || rel == "" {
+		return
+	}
+	c.mu.Lock()
+	w := c.byName[cam]
+	store := c.store
+	c.mu.Unlock()
+	if w == nil || store == nil {
+		return
+	}
+	go w.writeAlertClip(store, rel, at)
+}
+
+func (w *CameraWorker) writeAlertClip(store *EventStore, rel string, at time.Time) {
+	if w == nil || w.ring == nil || store == nil || rel == "" {
+		return
+	}
+	write := func(keep time.Duration) bool {
+		segs := w.ring.snapshot(keep)
+		if len(segs) == 0 {
+			return false
+		}
+		if err := store.WriteClipAt(rel, segs); err != nil {
+			if w.logQ != nil {
+				w.logQ <- fmt.Sprintf("%s: alert clip write: %v", w.cfg.Name, err)
+			}
+			return false
+		}
+		return true
+	}
+	gen := w.ring.generation()
+	ok := write(clipPreDur)
+	if w.afterClipPre != nil {
+		w.afterClipPre()
+	}
+	if clipPostDur > 0 {
+		wait := time.Until(at.Add(clipPostDur))
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+		if w.ring.generation() == gen && write(ringKeepDur()) {
+			ok = true
+		}
+	}
+	if ok && w.logQ != nil {
+		w.logQ <- fmt.Sprintf("%s: alert clip %s", w.cfg.Name, rel)
 	}
 }
 

@@ -6,11 +6,12 @@ import (
 )
 
 const (
-	occPersonTTL   = 5 * time.Second
-	occAnimalTTL   = 45 * time.Second
-	occGoneSamples = 3
-	occIoU         = 0.40
-	occExpandPx    = 48.0
+	occPersonTTL          = 5 * time.Second
+	occAnimalTTL          = 45 * time.Second
+	occGoneSamples        = 3
+	occVehicleGoneSamples = 60
+	occIoU                = 0.40
+	occExpandPx           = 48.0
 )
 
 type occTrack struct {
@@ -32,7 +33,7 @@ func newOccupancy() *occupancy {
 }
 
 func isVehicleClass(id int) bool {
-	return id == 2 || id == 5 || id == 7
+	return id == 1 || id == 2 || id == 3 || id == 5 || id == 7
 }
 
 func isAnimalClass(id int) bool {
@@ -88,11 +89,14 @@ func centerInExpanded(track occTrack, det occTrack) bool {
 }
 
 func associate(track occTrack, det occTrack) bool {
-	if track.classID != det.classID {
+	if track.classID != det.classID && !(track.vehicle && det.vehicle) {
 		return false
 	}
 	if boxIoU(track, det) >= occIoU {
 		return true
+	}
+	if track.vehicle && det.vehicle {
+		return centerInExpanded(track, det) || centerInExpanded(det, track)
 	}
 	if track.vehicle {
 		return false
@@ -164,6 +168,19 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 			matched[hit] = true
 			continue
 		}
+		// Second YOLO class on the same parked bakkie (truck+car) is not a new object.
+		if dt.vehicle {
+			dup := false
+			for _, tr := range tracks {
+				if associate(tr, dt) {
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
+		}
 		tracks = append(tracks, dt)
 		matched = append(matched, true)
 		fresh = append(fresh, d)
@@ -176,14 +193,14 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 			continue
 		}
 		if tr.vehicle {
-			// Empty/foliage infers are not "truck left" — only evict when
-			// another vehicle was seen and this track did not match.
+			// Empty infer is not leave. Need many misses: YOLO often drops
+			// one of two parked wrecks for tens of frames.
 			if !sawVehicle {
 				kept = append(kept, tr)
 				continue
 			}
 			tr.gone++
-			if tr.gone < occGoneSamples {
+			if tr.gone < occVehicleGoneSamples {
 				kept = append(kept, tr)
 			}
 			continue

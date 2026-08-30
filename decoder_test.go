@@ -217,3 +217,22 @@ func TestLastIRAPIndex(t *testing.T) {
 		t.Fatalf("nil %d want 0", i)
 	}
 }
+
+func TestAnnexBIsKeyframe(t *testing.T) {
+	if !annexBIsKeyframe(fakeHEVCKeyframe()) {
+		t.Fatal("HEVC IRAP")
+	}
+	cra := []byte{0, 0, 0, 1, 32, 0, 1, 2} // NAL type 16
+	if !annexBIsKeyframe(cra) {
+		t.Fatal("HEVC CRA")
+	}
+	if !annexBIsKeyframe([]byte{0, 0, 0, 1, 0x65, 0, 1}) {
+		t.Fatal("H.264 IDR")
+	}
+	if annexBIsKeyframe([]byte{0, 0, 0, 1, 2}) {
+		t.Fatal("P-frame")
+	}
+	if annexBIsKeyframe(nil) {
+		t.Fatal("empty")
+	}
+}

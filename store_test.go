@@ -61,6 +61,12 @@ func TestEventStore_SaveMotionAndPrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat(abs); !os.IsNotExist(err) {
+		t.Fatal("SaveMotion must not write clip")
+	}
+	if err := s.WriteClipAt(rec.ClipRel, ev.Segments); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(abs); err != nil {
 		t.Fatal(err)
 	}
@@ -106,11 +112,22 @@ func TestEventStore_loadRecentSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	ev := DetectEvent{Cam: "c1", At: time.Now(), Label: "motion", SAD: 4, Segments: [][]byte{fakeHEVCKeyframe()}}
-	if _, err := s.SaveMotion(ev, []byte{0xff, 0xd8, 0xff, 0xd9}); err != nil {
+	mrec, err := s.SaveMotion(ev, []byte{0xff, 0xd8, 0xff, 0xd9})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SaveAlert(ev, []byte{0xff, 0xd8, 0xff, 0xd9}, []DetBox{{Class: "person", Score: 0.9, ClassID: 0}}, "person", 0.9, "motion/x.h265"); err != nil {
+	arec, err := s.SaveAlert(ev, []byte{0xff, 0xd8, 0xff, 0xd9}, []DetBox{{Class: "person", Score: 0.9, ClassID: 0}}, "person", 0.9, "")
+	if err != nil {
 		t.Fatal(err)
+	}
+	for _, rel := range []string{mrec.ClipRel, arec.ClipRel} {
+		p, err := s.AbsMedia(rel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s clip written by save", rel)
+		}
 	}
 	s2, err := newEventStore(root, 7, 100)
 	if err != nil {
@@ -283,12 +300,22 @@ func TestEventStore_SaveAlertMultiBox(t *testing.T) {
 		t.Fatal(err)
 	}
 	ev := DetectEvent{Cam: "c1", At: time.Now(), Label: "motion", SAD: 12}
-	rec, err := s.SaveAlert(ev, jpg, dets, "person", 0.9, "motion/x.h265")
+	rec, err := s.SaveAlert(ev, jpg, dets, "person", 0.9, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rec.Type != "alert" || len(rec.Dets) != 2 {
 		t.Fatalf("want 2 dets: %+v", rec)
+	}
+	if rec.ClipRel != filepath.ToSlash(filepath.Join("alerts", ev.At.Format("20060102"), rec.ID+".h265")) {
+		t.Fatalf("clip rel: %s", rec.ClipRel)
+	}
+	clipAbs, err := s.AbsMedia(rec.ClipRel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(clipAbs); !os.IsNotExist(err) {
+		t.Fatal("SaveAlert must not write clip")
 	}
 	list := s.List(10, "alert")
 	if len(list) != 1 || list[0].Dets[1].Class != "car" {
@@ -297,5 +324,23 @@ func TestEventStore_SaveAlertMultiBox(t *testing.T) {
 	abs, _ := s.AbsMedia(rec.StillRel)
 	if st, err := os.Stat(abs); err != nil || st.Size() < 50 {
 		t.Fatalf("still missing or tiny")
+	}
+}
+
+func TestEventStore_WriteClipAt(t *testing.T) {
+	s, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := "alerts/20260829/x.h265"
+	if err := s.WriteClipAt(rel, [][]byte{fakeHEVCKeyframe()}); err != nil {
+		t.Fatal(err)
+	}
+	abs, err := s.AbsMedia(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(abs); err != nil || st.Size() == 0 {
+		t.Fatalf("clip missing: %v", err)
 	}
 }

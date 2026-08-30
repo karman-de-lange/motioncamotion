@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"time"
 	"unsafe"
 )
 
@@ -22,7 +23,9 @@ type yoloConfig struct {
 
 var cocoNames = map[int]string{
 	0:  "person",
+	1:  "bicycle",
 	2:  "car",
+	3:  "motorcycle",
 	5:  "bus",
 	7:  "truck",
 	14: "animal",
@@ -120,6 +123,18 @@ func runInferMulti(inf *C.OVInfer, rgb []byte, conf float64) (dets []DetBox, ms 
 	return out, float64(cMs), nil
 }
 
+var inferMulti = runInferMulti
+
+func hookInfer(fn func([]byte, float64) ([]DetBox, float64, error)) {
+	if fn == nil {
+		inferMulti = runInferMulti
+		return
+	}
+	inferMulti = func(_ *C.OVInfer, rgb []byte, conf float64) ([]DetBox, float64, error) {
+		return fn(rgb, conf)
+	}
+}
+
 func rgbMean(rgb []byte) int {
 	if len(rgb) == 0 {
 		return 0
@@ -131,7 +146,7 @@ func rgbMean(rgb []byte) int {
 	return sum / (len(rgb) / 3)
 }
 
-func runYOLOWorker(ctx context.Context, adm *admissions, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig) {
+func runYOLOWorker(ctx context.Context, adm *admissions, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig, capture func(string, string, time.Time)) {
 	device := C.GoString(C.ov_infer_device(inf))
 	logQ <- fmt.Sprintf("yolo ready device=%s main_conf=%.2f", device, yc.MainConf)
 	occ := newOccupancy()
@@ -141,51 +156,54 @@ func runYOLOWorker(ctx context.Context, adm *admissions, logQ chan<- string, sto
 		if !ok {
 			return
 		}
-		processDetect(ev, opened, logQ, store, inf, yc, occ)
+		processDetect(ev, opened, logQ, store, inf, yc, occ, capture)
 	}
 }
 
-func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig, occ *occupancy) {
+func beginAlertClip(ev DetectEvent, clipRel string, capture func(string, string, time.Time)) {
+	if clipRel == "" || capture == nil {
+		return
+	}
+	capture(ev.Cam, clipRel, ev.At)
+}
+
+func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig, occ *occupancy, capture func(string, string, time.Time)) {
 	mainRGB, frames, ok := decodeRGBNearEnd(ev.Segments, inferSize, inferSize)
-	stillRGB, stillW, stillH, _, stillOK := decodeRGBFitNearEnd(ev.Segments, stillMaxW, stillMaxH)
-	var stillPlain []byte
-	if stillOK {
-		if boxes := motionBlobDet(ev, stillW, stillH); len(boxes) > 0 {
-			if jpg, err := AnnotateRGB(stillRGB, stillW, stillH, boxes, 90); err == nil {
-				stillPlain = jpg
+	if !ok {
+		logQ <- fmt.Sprintf("%s: main decode failed aus=%d", ev.Cam, len(ev.Segments))
+		if saveClip && store != nil {
+			rec, err := store.SaveMotion(ev, nil)
+			if err != nil {
+				logQ <- fmt.Sprintf("%s: motion save failed: %v", ev.Cam, err)
+			} else {
+				beginAlertClip(ev, rec.ClipRel, capture)
+				logQ <- fmt.Sprintf("%s: motion saved %s", ev.Cam, rec.ID)
 			}
 		}
-		if stillPlain == nil {
-			stillPlain, _ = encodePreviewJPEG(stillRGB, stillW, stillH)
-		}
-	} else if ok {
+		return
+	}
+
+	dets, mainMS, err := inferMulti(inf, mainRGB, yc.MainConf)
+	clipRel := ""
+	if saveClip && store != nil {
+		var stillPlain []byte
 		if boxes := motionBlobDet(ev, inferSize, inferSize); len(boxes) > 0 {
-			if jpg, err := AnnotateRGB(mainRGB, inferSize, inferSize, boxes, 90); err == nil {
+			if jpg, e := AnnotateRGB(mainRGB, inferSize, inferSize, boxes, 90); e == nil {
 				stillPlain = jpg
 			}
 		}
 		if stillPlain == nil {
 			stillPlain, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
 		}
-	}
-
-	var clipRel string
-	if saveClip && store != nil {
-		rec, err := store.SaveMotion(ev, stillPlain)
-		if err != nil {
-			logQ <- fmt.Sprintf("%s: motion save failed: %v", ev.Cam, err)
+		rec, e := store.SaveMotion(ev, stillPlain)
+		if e != nil {
+			logQ <- fmt.Sprintf("%s: motion save failed: %v", ev.Cam, e)
 		} else {
+			beginAlertClip(ev, rec.ClipRel, capture)
 			clipRel = rec.ClipRel
 			logQ <- fmt.Sprintf("%s: motion saved %s", ev.Cam, rec.ID)
 		}
 	}
-
-	if !ok {
-		logQ <- fmt.Sprintf("%s: main decode failed aus=%d", ev.Cam, len(ev.Segments))
-		return
-	}
-
-	dets, mainMS, err := runInferMulti(inf, mainRGB, yc.MainConf)
 	if err != nil {
 		logQ <- fmt.Sprintf("%s: infer error: %v", ev.Cam, err)
 		return
@@ -210,22 +228,19 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 	logQ <- fmt.Sprintf("%s: main frames=%d infer=%.0fms pass=%v dets=%d fresh=%d score=%.2f %s",
 		ev.Cam, frames, mainMS, mainPass, len(dets), len(fresh), topScore, topName)
 
-	annRGB, annW, annH := mainRGB, inferSize, inferSize
-	annDets := dets
-	if stillOK {
-		annRGB, annW, annH = stillRGB, stillW, stillH
-		annDets = mapDetsLetterboxToStill(dets, inferSize, inferSize, stillW, stillH)
-	}
-	ann, err := AnnotateRGB(annRGB, annW, annH, annDets, 90)
+	ann, err := AnnotateRGB(mainRGB, inferSize, inferSize, dets, 90)
 	if err != nil {
 		logQ <- fmt.Sprintf("%s: annotate failed: %v", ev.Cam, err)
-		ann = stillPlain
+		ann, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
 	}
 	if store != nil && len(ann) > 0 {
 		arec, err := store.SaveAlert(ev, ann, dets, topName, topScore, clipRel)
 		if err != nil {
 			logQ <- fmt.Sprintf("%s: alert save failed: %v", ev.Cam, err)
 		} else {
+			if clipRel == "" {
+				beginAlertClip(ev, arec.ClipRel, capture)
+			}
 			logQ <- fmt.Sprintf("%s: alert saved %s dets=%d", ev.Cam, arec.ID, len(dets))
 		}
 	}

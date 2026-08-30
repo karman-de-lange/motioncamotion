@@ -193,7 +193,7 @@
       "threshold": 0.05
     }
   ],
-  "device": "GPU",
+  "device": "CPU",
   "fake_motion_sec": 0,
   "force_stage2": true,
   "headless": true,
@@ -201,7 +201,7 @@
   "media_dir": "media",
   "media_max_age_days": 7,
   "media_max_mb": 8192,
-  "model": "models/yolov8n.onnx",
+  "model": "models/yolo26s.onnx",
   "motion_cooldown_sec": 0,
   "motion_min_blob": 6,
   "motion_sustain_frames": 2,

@@ -60,6 +60,28 @@ func segmentHasIRAP(seg []byte) bool {
 	return found
 }
 
+func segmentHasH264IDR(seg []byte) bool {
+	found := false
+	forEachNALU(seg, func(nal []byte, _ int) {
+		i := 0
+		if len(nal) >= 4 && nal[0] == 0 && nal[1] == 0 && nal[2] == 0 && nal[3] == 1 {
+			i = 4
+		} else if len(nal) >= 3 && nal[0] == 0 && nal[1] == 0 && nal[2] == 1 {
+			i = 3
+		} else {
+			return
+		}
+		if i < len(nal) && nal[i]&0x1F == 5 {
+			found = true
+		}
+	})
+	return found
+}
+
+func annexBIsKeyframe(seg []byte) bool {
+	return segmentHasIRAP(seg) || segmentHasH264IDR(seg)
+}
+
 func lastIRAPIndex(segments [][]byte) int {
 	last := 0
 	for i, s := range segments {
