@@ -160,3 +160,51 @@ func TestOccupancy_smallMoverAssociates(t *testing.T) {
 		t.Fatalf("hik2-scale 10px move should match, got fresh %d", len(n))
 	}
 }
+
+func TestOccupancy_sittingAnimalEmptyInfersDoNotReAlert(t *testing.T) {
+	o := newOccupancy()
+	now := time.Now()
+	// cam57 18:29 stump/bird: ~17×26 at the same pixel every few seconds.
+	bird := DetBox{Class: "animal", ClassID: 14, Score: 0.48, X1: 113, Y1: 369, X2: 130, Y2: 395}
+	if n := o.consume("cam57", []DetBox{bird}, now); len(n) != 1 {
+		t.Fatalf("first bird: %d", len(n))
+	}
+	for i := 0; i < occGoneSamples+2; i++ {
+		o.consume("cam57", nil, now.Add(time.Duration(i+1)*time.Second))
+	}
+	if n := o.consume("cam57", []DetBox{bird}, now.Add(8*time.Second)); len(n) != 0 {
+		t.Fatalf("sitting bird re-alerted after empty infers: %d", len(n))
+	}
+	later := bird
+	later.Score = 0.45
+	if n := o.consume("cam57", []DetBox{later}, now.Add(2*time.Minute)); len(n) != 0 {
+		t.Fatalf("same stump after 2min re-alerted: %d", len(n))
+	}
+}
+
+func TestOccupancy_animalClassFlipSameBox(t *testing.T) {
+	o := newOccupancy()
+	now := time.Now()
+	bird := DetBox{Class: "animal", ClassID: 14, Score: 0.48, X1: 113, Y1: 369, X2: 130, Y2: 395}
+	sheep := DetBox{Class: "animal", ClassID: 18, Score: 0.48, X1: 112, Y1: 370, X2: 130, Y2: 394}
+	if n := o.consume("cam57", []DetBox{bird}, now); len(n) != 1 {
+		t.Fatalf("first: %d", len(n))
+	}
+	if n := o.consume("cam57", []DetBox{sheep}, now.Add(time.Second)); len(n) != 0 {
+		t.Fatalf("bird→sheep same stump re-alerted: %d", len(n))
+	}
+}
+
+func TestOccupancy_newAnimalElsewhereIsFresh(t *testing.T) {
+	o := newOccupancy()
+	now := time.Now()
+	stump := DetBox{Class: "animal", ClassID: 14, Score: 0.48, X1: 113, Y1: 369, X2: 130, Y2: 395}
+	deer := DetBox{Class: "animal", ClassID: 19, Score: 0.7, X1: 400, Y1: 200, X2: 480, Y2: 280}
+	if n := o.consume("cam57", []DetBox{stump}, now); len(n) != 1 {
+		t.Fatalf("stump: %d", len(n))
+	}
+	fresh := o.consume("cam57", []DetBox{stump, deer}, now.Add(time.Second))
+	if len(fresh) != 1 || fresh[0].ClassID != 19 {
+		t.Fatalf("deer elsewhere want 1 cow, got %+v", fresh)
+	}
+}

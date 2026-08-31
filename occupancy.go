@@ -7,9 +7,9 @@ import (
 
 const (
 	occPersonTTL          = 5 * time.Second
-	occAnimalTTL          = 45 * time.Second
 	occGoneSamples        = 3
 	occVehicleGoneSamples = 60
+	occAnimalGoneSamples  = 60
 	occIoU                = 0.40
 	occExpandPx           = 48.0
 )
@@ -21,6 +21,7 @@ type occTrack struct {
 	lastSeen time.Time
 	gone     int
 	vehicle  bool
+	animal   bool
 }
 
 type occupancy struct {
@@ -89,7 +90,7 @@ func centerInExpanded(track occTrack, det occTrack) bool {
 }
 
 func associate(track occTrack, det occTrack) bool {
-	if track.classID != det.classID && !(track.vehicle && det.vehicle) {
+	if track.classID != det.classID && !(track.vehicle && det.vehicle) && !(track.animal && det.animal) {
 		return false
 	}
 	if boxIoU(track, det) >= occIoU {
@@ -113,6 +114,7 @@ func detToTrack(d DetBox, now time.Time) occTrack {
 		y2:       d.Y2,
 		lastSeen: now,
 		vehicle:  isVehicleClass(d.ClassID),
+		animal:   isAnimalClass(d.ClassID),
 	}
 }
 
@@ -124,15 +126,11 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 	tracks := o.cams[cam]
 	alive := tracks[:0]
 	for _, tr := range tracks {
-		if tr.vehicle {
+		if tr.vehicle || tr.animal {
 			alive = append(alive, tr)
 			continue
 		}
-		ttl := occPersonTTL
-		if isAnimalClass(tr.classID) {
-			ttl = occAnimalTTL
-		}
-		if now.Sub(tr.lastSeen) < ttl {
+		if now.Sub(tr.lastSeen) < occPersonTTL {
 			alive = append(alive, tr)
 		}
 	}
@@ -140,10 +138,13 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 	matched := make([]bool, len(tracks))
 	var fresh []DetBox
 	sawVehicle := false
+	sawAnimal := false
 	for _, d := range dets {
 		if isVehicleClass(d.ClassID) {
 			sawVehicle = true
-			break
+		}
+		if isAnimalClass(d.ClassID) {
+			sawAnimal = true
 		}
 	}
 
@@ -205,12 +206,21 @@ func (o *occupancy) consume(cam string, dets []DetBox, now time.Time) []DetBox {
 			}
 			continue
 		}
-		ttl := occPersonTTL
-		if isAnimalClass(tr.classID) {
-			ttl = occAnimalTTL
+		if tr.animal {
+			// Empty infer is not leave. A sitting bird / stump false-positive
+			// flickers around conf and last-GOP extras would re-alert every few seconds.
+			if !sawAnimal {
+				kept = append(kept, tr)
+				continue
+			}
+			tr.gone++
+			if tr.gone < occAnimalGoneSamples {
+				kept = append(kept, tr)
+			}
+			continue
 		}
 		tr.gone++
-		if tr.gone < occGoneSamples && now.Sub(tr.lastSeen) < ttl {
+		if tr.gone < occGoneSamples && now.Sub(tr.lastSeen) < occPersonTTL {
 			kept = append(kept, tr)
 		}
 	}

@@ -85,6 +85,8 @@ type detectSpyDec struct {
 	fitN int
 	outW int
 	outH int
+	fitW int
+	fitH int
 }
 
 func (f *detectSpyDec) Thumb([]byte, []byte) int { return -1 }
@@ -100,6 +102,7 @@ func (f *detectSpyDec) RGB(_ []byte, rgbOut []byte, outW, outH int) int {
 
 func (f *detectSpyDec) RGBFit(_ []byte, rgbOut []byte, maxW, maxH int) (int, int, int) {
 	f.fitN++
+	f.fitW, f.fitH = maxW, maxH
 	n := maxW * maxH * 3
 	if n > len(rgbOut) {
 		n = len(rgbOut)
@@ -137,7 +140,7 @@ func jpegSize(t *testing.T, store *EventStore, rel string) (w, h int) {
 	return img.Bounds().Dx(), img.Bounds().Dy()
 }
 
-func TestProcessDetect_one640DecodeNoFit(t *testing.T) {
+func TestProcessDetect_infer640GalleryFit(t *testing.T) {
 	store, err := newEventStore(t.TempDir(), 1, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -166,11 +169,8 @@ func TestProcessDetect_one640DecodeNoFit(t *testing.T) {
 	}
 	processDetect(ev, true, logQ, store, nil, yc, occ, nil)
 
-	if sessions != 1 {
-		t.Fatalf("decoder sessions=%d want 1 (dual 1920?)", sessions)
-	}
-	if spy.fitN != 0 {
-		t.Fatalf("RGBFit=%d on infer path", spy.fitN)
+	if sessions != 2 {
+		t.Fatalf("decoder sessions=%d want 2 (infer+gallery)", sessions)
 	}
 	if spy.rgbN != 4 {
 		t.Fatalf("RGB calls=%d want 4 (lastIRAPIndex slice?)", spy.rgbN)
@@ -178,22 +178,25 @@ func TestProcessDetect_one640DecodeNoFit(t *testing.T) {
 	if spy.outW != inferSize || spy.outH != inferSize {
 		t.Fatalf("RGB size %dx%d want %d", spy.outW, spy.outH, inferSize)
 	}
+	if spy.fitN == 0 || spy.fitW != stillMaxW || spy.fitH != stillMaxH {
+		t.Fatalf("RGBFit n=%d %dx%d want %dx%d", spy.fitN, spy.fitW, spy.fitH, stillMaxW, stillMaxH)
+	}
 
 	mot := store.List(20, "motion")
 	if len(mot) != 1 || mot[0].StillRel == "" {
 		t.Fatalf("motion %+v", mot)
 	}
 	mw, mh := jpegSize(t, store, mot[0].StillRel)
-	if mw != inferSize || mh != inferSize {
-		t.Fatalf("motion still %dx%d want %d", mw, mh, inferSize)
+	if mw != stillMaxW || mh != stillMaxH {
+		t.Fatalf("motion still %dx%d want %dx%d", mw, mh, stillMaxW, stillMaxH)
 	}
 	al := store.List(20, "alert")
 	if len(al) != 1 || al[0].StillRel == "" {
 		t.Fatalf("alert %+v", al)
 	}
 	aw, ah := jpegSize(t, store, al[0].StillRel)
-	if aw != inferSize || ah != inferSize {
-		t.Fatalf("alert still %dx%d want %d (1920 gallery decode?)", aw, ah, inferSize)
+	if aw != stillMaxW || ah != stillMaxH {
+		t.Fatalf("alert still %dx%d want %dx%d", aw, ah, stillMaxW, stillMaxH)
 	}
 	for _, rec := range []EventRecord{mot[0], al[0]} {
 		abs, err := store.AbsMedia(rec.ClipRel)

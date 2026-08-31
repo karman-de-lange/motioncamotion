@@ -183,17 +183,32 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 		return
 	}
 
+	var stillRGB []byte
+	var stillW, stillH int
+	loadGallery := func() {
+		if stillRGB != nil {
+			return
+		}
+		rgb, w, h, _, fitOK := decodeRGBFitNearEnd(ev.Segments, stillMaxW, stillMaxH)
+		if fitOK {
+			stillRGB, stillW, stillH = rgb, w, h
+			return
+		}
+		stillRGB, stillW, stillH = mainRGB, inferSize, inferSize
+	}
+
 	dets, mainMS, err := inferMulti(inf, mainRGB, yc.MainConf)
 	clipRel := ""
 	if saveClip && store != nil {
+		loadGallery()
 		var stillPlain []byte
-		if boxes := motionBlobDet(ev, inferSize, inferSize); len(boxes) > 0 {
-			if jpg, e := AnnotateRGB(mainRGB, inferSize, inferSize, boxes, 90); e == nil {
+		if boxes := motionBlobDet(ev, stillW, stillH); len(boxes) > 0 {
+			if jpg, e := AnnotateRGB(stillRGB, stillW, stillH, boxes, 90); e == nil {
 				stillPlain = jpg
 			}
 		}
 		if stillPlain == nil {
-			stillPlain, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
+			stillPlain, _ = encodePreviewJPEG(stillRGB, stillW, stillH)
 		}
 		rec, e := store.SaveMotion(ev, stillPlain)
 		if e != nil {
@@ -228,10 +243,15 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 	logQ <- fmt.Sprintf("%s: main frames=%d infer=%.0fms pass=%v dets=%d fresh=%d score=%.2f %s",
 		ev.Cam, frames, mainMS, mainPass, len(dets), len(fresh), topScore, topName)
 
-	ann, err := AnnotateRGB(mainRGB, inferSize, inferSize, dets, 90)
+	loadGallery()
+	annDets := dets
+	if stillW != inferSize || stillH != inferSize {
+		annDets = mapDetsLetterboxToStill(dets, inferSize, inferSize, stillW, stillH)
+	}
+	ann, err := AnnotateRGB(stillRGB, stillW, stillH, annDets, 90)
 	if err != nil {
 		logQ <- fmt.Sprintf("%s: annotate failed: %v", ev.Cam, err)
-		ann, _ = encodePreviewJPEG(mainRGB, inferSize, inferSize)
+		ann, _ = encodePreviewJPEG(stillRGB, stillW, stillH)
 	}
 	if store != nil && len(ann) > 0 {
 		arec, err := store.SaveAlert(ev, ann, dets, topName, topScore, clipRel)
