@@ -176,6 +176,92 @@ func TestEventStore_pruneSizePrefersMotion(t *testing.T) {
 	}
 }
 
+func TestEventStore_pruneSizeKeepsAlertMotionClip(t *testing.T) {
+	root := t.TempDir()
+	day := "20260101"
+	motDir := filepath.Join(root, "motion", day)
+	alDir := filepath.Join(root, "alerts", day)
+	if err := os.MkdirAll(motDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(alDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(motDir, "plain.h265")
+	alertClip := filepath.Join(motDir, "alertclip.h265")
+	alertStill := filepath.Join(alDir, "keep.jpg")
+	if err := os.WriteFile(plain, make([]byte, 700*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alertClip, make([]byte, 700*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alertStill, make([]byte, 50*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(plain, old, old)
+	_ = os.Chtimes(alertClip, old.Add(time.Minute), old.Add(time.Minute))
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	writeJSONL(t, root, []EventRecord{
+		{ID: "plain", Type: "motion", Cam: "c1", At: at, ClipRel: "motion/20260101/plain.h265"},
+		{ID: "al", Type: "alert", Cam: "c1", At: at.Add(time.Minute), ClipRel: "motion/20260101/alertclip.h265", StillRel: "alerts/20260101/keep.jpg"},
+	})
+	s, err := newEventStore(root, 7, 1) // 1 MiB cap
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.Prune()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatalf("expected a removal, got %d", n)
+	}
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatal("unreferenced motion clip should be pruned first")
+	}
+	if _, err := os.Stat(alertClip); err != nil {
+		t.Fatal("alert-referenced motion clip should survive size prune")
+	}
+	if _, err := os.Stat(alertStill); err != nil {
+		t.Fatal("alert still should survive size prune")
+	}
+}
+
+func TestEventStore_pruneClearsMissingAlertClipRel(t *testing.T) {
+	root := t.TempDir()
+	day := "20260101"
+	alDir := filepath.Join(root, "alerts", day)
+	if err := os.MkdirAll(alDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(alDir, "keep.jpg"), []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	writeJSONL(t, root, []EventRecord{
+		{ID: "al", Type: "alert", Cam: "cam118", At: at, ClipRel: "motion/20260101/gone.h265", StillRel: "alerts/20260101/keep.jpg"},
+	})
+	s, err := newEventStore(root, 7, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	page := s.queryEvents(eventQuery{Type: "alert", Limit: 10})
+	if len(page.Events) != 1 {
+		t.Fatalf("want alert kept: %+v", page)
+	}
+	if page.Events[0].ClipRel != "" {
+		t.Fatalf("missing clip should be cleared: %s", page.Events[0].ClipRel)
+	}
+	if page.Events[0].StillRel != "alerts/20260101/keep.jpg" {
+		t.Fatalf("still should remain: %s", page.Events[0].StillRel)
+	}
+}
+
 func writeJSONL(t *testing.T, root string, recs []EventRecord) {
 	t.Helper()
 	path := filepath.Join(root, "events.jsonl")

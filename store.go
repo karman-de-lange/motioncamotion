@@ -435,19 +435,22 @@ func (s *EventStore) pruneLocked(now time.Time) (int, error) {
 	if s.maxBytes > 0 && total > s.maxBytes {
 		var motion, alerts []fileInfo
 		root := filepath.Clean(s.root)
+		// Alert records point at motion/*.h265 (shared clip). Treat those
+		// files as alerts so size prune cannot 404 a listed alert download.
+		alertKeep := s.alertKeepPaths()
 		for _, f := range files {
 			rel, err := filepath.Rel(root, f.path)
 			if err != nil {
 				motion = append(motion, f)
 				continue
 			}
-			if strings.HasPrefix(filepath.ToSlash(rel), "alerts/") {
+			if strings.HasPrefix(filepath.ToSlash(rel), "alerts/") || alertKeep[filepath.Clean(f.path)] {
 				alerts = append(alerts, f)
 			} else {
 				motion = append(motion, f)
 			}
 		}
-		// Drop oldest motion first so restart prune cannot wipe the alert list.
+		// Drop oldest unreferenced motion first so restart prune cannot wipe the alert list.
 		sort.Slice(motion, func(i, j int) bool { return motion[i].mod.Before(motion[j].mod) })
 		for _, f := range motion {
 			if total <= s.maxBytes {
@@ -495,19 +498,10 @@ func (s *EventStore) rewriteIndexExisting() error {
 		if json.Unmarshal(sc.Bytes(), &rec) != nil {
 			continue
 		}
-		// Keep if any referenced media file still exists.
-		ok := false
-		for _, rel := range []string{rec.ClipRel, rec.VideoRel, rec.StillRel} {
-			if rel == "" {
-				continue
-			}
-			p := filepath.Join(s.root, filepath.FromSlash(rel))
-			if _, err := os.Stat(p); err == nil {
-				ok = true
-				break
-			}
-		}
-		if ok {
+		rec.ClipRel = s.existingRel(rec.ClipRel)
+		rec.VideoRel = s.existingRel(rec.VideoRel)
+		rec.StillRel = s.existingRel(rec.StillRel)
+		if rec.ClipRel != "" || rec.VideoRel != "" || rec.StillRel != "" {
 			kept = append(kept, rec)
 		}
 	}
@@ -530,6 +524,46 @@ func (s *EventStore) rewriteIndexExisting() error {
 	}
 	s.recent = kept
 	return nil
+}
+
+func (s *EventStore) existingRel(rel string) string {
+	if rel == "" {
+		return ""
+	}
+	p := filepath.Join(s.root, filepath.FromSlash(rel))
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return rel
+}
+
+// alertKeepPaths is media referenced by type=alert index rows (absolute under root).
+func (s *EventStore) alertKeepPaths() map[string]bool {
+	keep := make(map[string]bool)
+	f, err := os.Open(s.index)
+	if err != nil {
+		return keep
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	sc.Buffer(buf, 1024*1024)
+	for sc.Scan() {
+		var rec EventRecord
+		if json.Unmarshal(sc.Bytes(), &rec) != nil {
+			continue
+		}
+		if rec.Type != "alert" {
+			continue
+		}
+		for _, rel := range []string{rec.ClipRel, rec.VideoRel, rec.StillRel} {
+			if rel == "" {
+				continue
+			}
+			keep[filepath.Clean(filepath.Join(s.root, filepath.FromSlash(rel)))] = true
+		}
+	}
+	return keep
 }
 
 // SelectPruneCandidates is pure helper used by tests: given files with mtime/size,

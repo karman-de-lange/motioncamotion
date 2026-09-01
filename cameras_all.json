@@ -200,7 +200,7 @@
   "main_conf": 0.45,
   "media_dir": "media",
   "media_max_age_days": 7,
-  "media_max_mb": 8192,
+  "media_max_mb": 65536,
   "model": "models/yolo26s.onnx",
   "motion_cooldown_sec": 0,
   "motion_min_blob": 6,
