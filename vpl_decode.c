@@ -5,16 +5,30 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
+#include <linux/dma-buf.h>
+#include <va/va.h>
+#include <va/va_drmcommon.h>
 #include <vpl/mfx.h>
 #include <vpl/mfxmemory.h>
 #include <vpl/mfxvideo.h>
+
+#ifndef DRM_FORMAT_MOD_LINEAR
+#define DRM_FORMAT_MOD_LINEAR 0
+#endif
+#ifndef I915_FORMAT_MOD_Y_TILED
+#define I915_FORMAT_MOD_Y_TILED (((uint64_t)0x01 << 56) | 2)
+#endif
 
 struct VPLDecoder {
     mfxSession session;
     mfxVideoParam dec_par;
     int dec_inited;
     mfxU32 codec_id;
+    VADisplay va_dpy;
 };
 
 static void downscale_y(const uint8_t *src, int src_w, int src_h, int src_pitch,
@@ -25,6 +39,31 @@ static void downscale_y(const uint8_t *src, int src_w, int src_h, int src_pitch,
         for (int x = 0; x < dst_w; x++) {
             int sx = x * src_w / dst_w;
             dst[y * dst_w + x] = row[sx];
+        }
+    }
+}
+
+/* I915 Y-tile 8bpp: 128×32 tiles, 16-byte columns. */
+static uint8_t ytile_load(const uint8_t *base, int pitch, int x, int y) {
+    int tiles_per_row = pitch / 128;
+    int tile_x = x / 128;
+    int tile_y = y / 32;
+    int x_in = x % 128;
+    int y_in = y % 32;
+    size_t off = (size_t)(tile_y * tiles_per_row + tile_x) * 4096
+               + (size_t)(x_in / 16) * 512
+               + (size_t)y_in * 16
+               + (size_t)(x_in % 16);
+    return base[off];
+}
+
+static void downscale_y_tiled(const uint8_t *base, int pitch, int crop_x, int crop_y,
+                              int src_w, int src_h, uint8_t *dst) {
+    for (int y = 0; y < THUMB_H; y++) {
+        int sy = crop_y + y * src_h / THUMB_H;
+        for (int x = 0; x < THUMB_W; x++) {
+            int sx = crop_x + x * src_w / THUMB_W;
+            dst[y * THUMB_W + x] = ytile_load(base, pitch, sx, sy);
         }
     }
 }
@@ -400,6 +439,11 @@ int vpl_decoder_new(VPLDecoder **out, int codec) {
         return -10 - (int)sts;
     }
 
+    sts = MFXVideoCORE_GetHandle(d->session, MFX_HANDLE_VA_DISPLAY, (mfxHDL *)&d->va_dpy);
+    if (sts != MFX_ERR_NONE) {
+        d->va_dpy = NULL;
+    }
+
     *out = d;
     return 0;
 }
@@ -497,6 +541,92 @@ static int map_thumb_rgb(mfxFrameSurface1 *decoded,
     return 0;
 }
 
+static int thumb_from_decoded(VPLDecoder *d, mfxFrameSurface1 *decoded, uint8_t *y_out) {
+    if (!d->va_dpy) {
+        mfxStatus sts = MFXVideoCORE_GetHandle(d->session, MFX_HANDLE_VA_DISPLAY, (mfxHDL *)&d->va_dpy);
+        if (sts != MFX_ERR_NONE || !d->va_dpy) {
+            return -97;
+        }
+    }
+    if (!decoded->FrameInterface || !decoded->FrameInterface->GetNativeHandle) {
+        return -95;
+    }
+
+    mfxHDL native = NULL;
+    mfxResourceType rtype = 0;
+    mfxStatus sts = decoded->FrameInterface->GetNativeHandle(decoded, &native, &rtype);
+    if (sts != MFX_ERR_NONE || !native ||
+        (rtype != MFX_RESOURCE_VA_SURFACE && rtype != MFX_RESOURCE_VA_SURFACE_PTR)) {
+        return -98;
+    }
+    VASurfaceID sid = *(VASurfaceID *)native;
+    if (sid == VA_INVALID_SURFACE) {
+        return -98;
+    }
+
+    int w = decoded->Info.CropW ? decoded->Info.CropW : decoded->Info.Width;
+    int h = decoded->Info.CropH ? decoded->Info.CropH : decoded->Info.Height;
+    int crop_x = decoded->Info.CropX;
+    int crop_y = decoded->Info.CropY;
+    if (w <= 0 || h <= 0) {
+        return -96;
+    }
+
+    VAStatus va = vaSyncSurface(d->va_dpy, sid);
+    if (va != VA_STATUS_SUCCESS) {
+        return -110 - (int)va;
+    }
+
+    VADRMPRIMESurfaceDescriptor desc;
+    memset(&desc, 0, sizeof(desc));
+    va = vaExportSurfaceHandle(d->va_dpy, sid, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                               VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
+                               &desc);
+    if (va != VA_STATUS_SUCCESS || desc.num_objects < 1 || desc.num_layers < 1) {
+        return -111;
+    }
+
+    int fd = desc.objects[0].fd;
+    size_t sz = desc.objects[0].size;
+    int pitch = (int)desc.layers[0].pitch[0];
+    uint32_t y_off = desc.layers[0].offset[0];
+    uint64_t mod = desc.objects[0].drm_format_modifier;
+    if (fd < 0 || sz == 0 || pitch <= 0 || y_off >= sz) {
+        if (fd >= 0) {
+            close(fd);
+        }
+        return -112;
+    }
+
+    void *map = mmap(NULL, sz, PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        close(fd);
+        return -113;
+    }
+
+    struct dma_buf_sync sync;
+    memset(&sync, 0, sizeof(sync));
+    sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ;
+    (void)ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+
+    const uint8_t *ybase = (const uint8_t *)map + y_off;
+    int rc = 0;
+    if (mod == DRM_FORMAT_MOD_LINEAR) {
+        downscale_y(ybase + (size_t)crop_y * (size_t)pitch + (size_t)crop_x,
+                    w, h, pitch, y_out, THUMB_W, THUMB_H);
+    } else if (mod == I915_FORMAT_MOD_Y_TILED && (pitch & 127) == 0) {
+        downscale_y_tiled(ybase, pitch, crop_x, crop_y, w, h, y_out);
+    } else {
+        rc = -114;
+    }
+
+    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+    (void)ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+    munmap(map, sz);
+    close(fd);
+    return rc;
+}
+
 int vpl_decoder_thumb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *y_out, int y_cap) {
     if (!d || !data || len == 0 || !y_out || y_cap < THUMB_Y_SIZE) {
         return -1;
@@ -508,7 +638,7 @@ int vpl_decoder_thumb(VPLDecoder *d, const uint8_t *data, size_t len, uint8_t *y
         return rc;
     }
 
-    rc = map_thumb_rgb(decoded, y_out, y_cap, NULL, 0, 0, 0, NULL, NULL, 0);
+    rc = thumb_from_decoded(d, decoded, y_out);
     decoded->FrameInterface->Release(decoded);
     return rc;
 }

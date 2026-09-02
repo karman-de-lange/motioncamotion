@@ -509,6 +509,50 @@ func countClipRGBFit(t *testing.T, dec FrameDecoder, aus [][]byte) int {
 	return n
 }
 
+func TestVPL_hevcThumbFromClip(t *testing.T) {
+	data, err := os.ReadFile("clips/hik1_20260611_224034.h265")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aus := hevcGOPAUs(data, false)
+	if len(aus) < 3 {
+		t.Fatalf("need several AUs, got %d", len(aus))
+	}
+	dec, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || dec == nil {
+		t.Fatalf("decoder new %d", rc)
+	}
+	defer dec.Close()
+	y := make([]byte, thumbSize)
+	n := 0
+	for _, au := range aus {
+		if len(au) == 0 {
+			continue
+		}
+		if dec.Thumb(au, y) == DecOK {
+			n++
+		}
+	}
+	if n < 2 {
+		t.Fatalf("thumb pictures=%d aus=%d (stalled?)", n, len(aus))
+	}
+	sum := 0
+	minV, maxV := 255, 0
+	for _, b := range y {
+		v := int(b)
+		sum += v
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+	}
+	if sum == 0 || minV == maxV {
+		t.Fatalf("thumb looks empty/flat sum=%d min=%d max=%d", sum, minV, maxV)
+	}
+}
+
 func TestVPL_hevcThumbWithoutCompleteFrame(t *testing.T) {
 	data, err := os.ReadFile("clips/hik1_20260611_224034.h265")
 	if err != nil {

@@ -4,7 +4,7 @@ package main
 
 /*
 #cgo CFLAGS: -I/usr/include/vpl
-#cgo LDFLAGS: -lmfx-gen -lstdc++
+#cgo LDFLAGS: -lmfx-gen -lstdc++ -lva
 
 #include <stdlib.h>
 #include "vpl_decode.h"
