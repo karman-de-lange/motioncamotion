@@ -193,7 +193,7 @@
       "threshold": 0.05
     }
   ],
-  "device": "CPU",
+  "device": "GPU",
   "fake_motion_sec": 0,
   "force_stage2": true,
   "headless": true,
