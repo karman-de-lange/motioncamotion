@@ -269,9 +269,19 @@ func (s *EventStore) queryEvents(q eventQuery) eventPage {
 	return page
 }
 
+func eventMediaID(ev DetectEvent) (id, day string) {
+	id = fmt.Sprintf("%s_%s_%d", ev.Cam, ev.At.Format("20060102_150405"), ev.At.UnixNano()%1e6)
+	day = ev.At.Format("20060102")
+	return
+}
+
+func motionClipRel(ev DetectEvent) string {
+	id, day := eventMediaID(ev)
+	return filepath.ToSlash(filepath.Join("motion", day, id+".h265"))
+}
+
 func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, error) {
-	id := fmt.Sprintf("%s_%s_%d", ev.Cam, ev.At.Format("20060102_150405"), ev.At.UnixNano()%1e6)
-	day := ev.At.Format("20060102")
+	id, day := eventMediaID(ev)
 	dir := filepath.Join(s.root, "motion", day)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return EventRecord{}, err
@@ -284,7 +294,7 @@ func (s *EventStore) SaveMotion(ev DetectEvent, stillJPEG []byte) (EventRecord, 
 		Label:   ev.Label,
 		SAD:     ev.SAD,
 		Pass:    false,
-		ClipRel: filepath.ToSlash(filepath.Join("motion", day, id+".h265")),
+		ClipRel: motionClipRel(ev),
 	}
 	if len(stillJPEG) > 0 {
 		stillName := id + ".jpg"
@@ -322,8 +332,7 @@ func (s *EventStore) WriteClipAt(rel string, segments [][]byte) error {
 }
 
 func (s *EventStore) SaveAlert(ev DetectEvent, stillJPEG []byte, dets []DetBox, topClass string, topScore float64, clipRel string) (EventRecord, error) {
-	id := fmt.Sprintf("%s_%s_%d", ev.Cam, ev.At.Format("20060102_150405"), ev.At.UnixNano()%1e6)
-	day := ev.At.Format("20060102")
+	id, day := eventMediaID(ev)
 	dir := filepath.Join(s.root, "alerts", day)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return EventRecord{}, err

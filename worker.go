@@ -50,6 +50,7 @@ type CameraWorker struct {
 	afterClipPre     func()
 	adm              *admissions
 	episode          bool
+	clipper          *alertClipper
 
 	logQ chan<- string
 }
@@ -512,6 +513,9 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool, blo
 		w.adm.release(h)
 		return false
 	}
+	if opened {
+		w.clipper.capture(ev.Cam, motionClipRel(ev), ev.At)
+	}
 	if w.logQ == nil || !opened {
 		return true
 	}
@@ -546,6 +550,7 @@ func (c *alertClipper) register(w *CameraWorker) {
 	}
 	c.byName[w.cfg.Name] = w
 	c.mu.Unlock()
+	w.clipper = c
 }
 
 func (c *alertClipper) capture(cam, rel string, at time.Time) {
@@ -564,6 +569,9 @@ func (c *alertClipper) capture(cam, rel string, at time.Time) {
 
 func (w *CameraWorker) writeAlertClip(store *EventStore, rel string, at time.Time) {
 	if w == nil || w.ring == nil || store == nil || rel == "" {
+		return
+	}
+	if clipPostDur > 0 && time.Until(at.Add(clipPostDur)) <= 0 {
 		return
 	}
 	write := func(keep time.Duration) bool {

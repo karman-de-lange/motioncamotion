@@ -176,7 +176,6 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 			if err != nil {
 				logQ <- fmt.Sprintf("%s: motion save failed: %v", ev.Cam, err)
 			} else {
-				beginAlertClip(ev, rec.ClipRel, capture)
 				logQ <- fmt.Sprintf("%s: motion saved %s", ev.Cam, rec.ID)
 			}
 		}
@@ -214,7 +213,6 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 		if e != nil {
 			logQ <- fmt.Sprintf("%s: motion save failed: %v", ev.Cam, e)
 		} else {
-			beginAlertClip(ev, rec.ClipRel, capture)
 			clipRel = rec.ClipRel
 			logQ <- fmt.Sprintf("%s: motion saved %s", ev.Cam, rec.ID)
 		}

@@ -231,21 +231,15 @@ func TestProcessDetect_openPassCapturesOnce(t *testing.T) {
 	}
 	processDetect(ev, true, make(chan string, 64), store, nil, yoloConfig{MainConf: 0.65}, newOccupancy(),
 		func(cam, rel string, at time.Time) {
-			if cam != "c1" || !at.Equal(ev.At) {
-				t.Fatalf("capture %s %v", cam, at)
-			}
 			rels = append(rels, rel)
 		})
-	if len(rels) != 1 {
-		t.Fatalf("captures=%d want 1 (open+pass double write?)", len(rels))
+	if len(rels) != 0 {
+		t.Fatalf("captures=%d want 0 (open clip starts at enqueue)", len(rels))
 	}
 	mot := store.List(1, "motion")
 	al := store.List(1, "alert")
 	if len(mot) != 1 || len(al) != 1 {
 		t.Fatalf("motion=%d alert=%d", len(mot), len(al))
-	}
-	if rels[0] != mot[0].ClipRel {
-		t.Fatalf("captured %s want motion %s", rels[0], mot[0].ClipRel)
 	}
 	if al[0].ClipRel != mot[0].ClipRel {
 		t.Fatalf("alert clip %s want motion %s", al[0].ClipRel, mot[0].ClipRel)

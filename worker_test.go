@@ -663,6 +663,87 @@ func TestWriteAlertClip_reconnectKeepsPreRoll(t *testing.T) {
 	}
 }
 
+func TestEnqueueDetect_openCapturesClip(t *testing.T) {
+	store, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPost := clipPostDur
+	clipPostDur = 0
+	defer func() { clipPostDur = oldPost }()
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions()
+	clipper := &alertClipper{store: store}
+	clipper.register(w)
+	pre := append(fakeHEVCKeyframe(), []byte("PREDATA")...)
+	w.ring.push(pre)
+	preDone := make(chan struct{})
+	w.afterClipPre = func() { close(preDone) }
+	if !w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
+		t.Fatal("open")
+	}
+	ev, opened, ok := w.adm.pull()
+	if !ok || !opened {
+		t.Fatal("missing open job")
+	}
+	waitDone(t, preDone, "open did not start clip")
+	abs, err := store.AbsMedia(motionClipRel(ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("PREDATA")) {
+		t.Fatal("clip missing fire-time ring")
+	}
+}
+
+func TestEnqueueDetect_extraDoesNotCaptureClip(t *testing.T) {
+	store, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPost := clipPostDur
+	clipPostDur = 0
+	defer func() { clipPostDur = oldPost }()
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions()
+	clipper := &alertClipper{store: store}
+	clipper.register(w)
+	w.ring.push(fakeHEVCKeyframe())
+	preDone := make(chan struct{})
+	w.afterClipPre = func() { close(preDone) }
+	if !w.enqueueDetect("motion", 1, false, 0, 0, 0, 0) {
+		t.Fatal("extra")
+	}
+	select {
+	case <-preDone:
+		t.Fatal("extra enqueue started clip")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestWriteAlertClip_lateDoesNotDumpLiveRing(t *testing.T) {
+	store, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	late := append(fakeHEVCKeyframe(), []byte("LATEDATA")...)
+	w.ring.push(late)
+	rel := "motion/20260907/late.h265"
+	abs, err := store.AbsMedia(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.writeAlertClip(store, rel, time.Now().Add(-8*time.Minute))
+	if _, err := os.Stat(abs); !os.IsNotExist(err) {
+		t.Fatal("late capture dumped live ring")
+	}
+}
+
 func TestWriteAlertClip_emptyRingNoLog(t *testing.T) {
 	oldPost := clipPostDur
 	clipPostDur = 0
