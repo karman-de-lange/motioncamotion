@@ -229,6 +229,56 @@ func TestEventStore_pruneSizeKeepsAlertMotionClip(t *testing.T) {
 	}
 }
 
+func TestEventStore_pruneKeepsHeldMotionClip(t *testing.T) {
+	root := t.TempDir()
+	day := "20260101"
+	motDir := filepath.Join(root, "motion", day)
+	if err := os.MkdirAll(motDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	held := filepath.Join(motDir, "held.h265")
+	plain := filepath.Join(motDir, "plain.h265")
+	body := make([]byte, 700*1024)
+	if err := os.WriteFile(held, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(held, old, old)
+	_ = os.Chtimes(plain, old.Add(time.Minute), old.Add(time.Minute))
+	s, err := newEventStore(root, 7, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := "motion/20260101/held.h265"
+	s.HoldClip(rel)
+	if _, err := s.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(held); err != nil {
+		t.Fatal("held motion clip should survive size prune")
+	}
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatal("unheld motion clip should be pruned")
+	}
+	s.ReleaseClip(rel)
+	other := filepath.Join(motDir, "other.h265")
+	if err := os.WriteFile(other, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(held); !os.IsNotExist(err) {
+		t.Fatal("released clip should prune")
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatal("newer motion clip should remain")
+	}
+}
+
 func TestEventStore_pruneClearsMissingAlertClipRel(t *testing.T) {
 	root := t.TempDir()
 	day := "20260101"
@@ -351,6 +401,126 @@ func TestEventStore_ListPageReadsPastRecent(t *testing.T) {
 	until := s.queryEvents(eventQuery{Type: "alert", Until: newAt, Limit: 10})
 	if until.Total != 1 || until.Events[0].ID != "old-alert" {
 		t.Fatalf("until exclusive: %+v", until)
+	}
+}
+
+func TestEventStore_VerdictFiltersAndPersists(t *testing.T) {
+	root := t.TempDir()
+	at := time.Date(2026, 9, 21, 17, 24, 58, 0, time.UTC)
+	writeJSONL(t, root, []EventRecord{
+		{ID: "hik3_post", Type: "alert", Cam: "hik3", At: at, MainClass: "person"},
+		{ID: "hik3_person", Type: "alert", Cam: "hik3", At: at.Add(time.Minute), MainClass: "person"},
+		{ID: "cam56_rain", Type: "alert", Cam: "cam56", At: at.Add(2 * time.Minute), MainClass: "animal"},
+	})
+	s, err := newEventStore(root, 7, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.SetVerdict("hik3_post", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if _, fn, rn, err := s.SetVerdict("hik3_person", "real"); err != nil {
+		t.Fatal(err)
+	} else if fn != 1 || rn != 1 {
+		t.Fatalf("counts false=%d real=%d", fn, rn)
+	}
+	falses := s.queryEvents(eventQuery{Verdict: "false", Limit: 10})
+	if falses.Total != 1 || falses.Events[0].ID != "hik3_post" || falses.Events[0].Verdict != "false" || falses.FalseN != 1 {
+		t.Fatalf("false page: %+v", falses)
+	}
+	unmarked := s.queryEvents(eventQuery{Verdict: "none", Limit: 10})
+	if unmarked.Total != 1 || unmarked.Events[0].ID != "cam56_rain" {
+		t.Fatalf("unmarked: %+v", unmarked)
+	}
+	if _, _, _, err := s.SetVerdict("../etc", "false"); err == nil {
+		t.Fatal("path id should be rejected")
+	}
+	if _, fn, rn, err := s.SetVerdict("hik3_post", ""); err != nil {
+		t.Fatal(err)
+	} else if fn != 0 || rn != 1 {
+		t.Fatalf("cleared counts false=%d real=%d", fn, rn)
+	}
+
+	s2, err := newEventStore(root, 7, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := s2.queryEvents(eventQuery{Verdict: "real", Limit: 10})
+	if real.Total != 1 || real.Events[0].ID != "hik3_person" || real.RealN != 1 || real.FalseN != 0 {
+		t.Fatalf("reloaded: %+v", real)
+	}
+}
+
+func TestEventStore_SetVerdictWriteFailureRestores(t *testing.T) {
+	root := t.TempDir()
+	at := time.Date(2026, 9, 21, 17, 24, 58, 0, time.UTC)
+	writeJSONL(t, root, []EventRecord{
+		{ID: "hik3_post", Type: "alert", Cam: "hik3", At: at, MainClass: "person"},
+	})
+	s, err := newEventStore(root, 7, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.SetVerdict("hik3_post", "real"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "verdicts.json")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.SetVerdict("hik3_post", "false"); err == nil {
+		t.Fatal("write onto a directory should fail")
+	}
+	s.mu.Lock()
+	got := s.verdicts["hik3_post"]
+	s.mu.Unlock()
+	if got != "real" {
+		t.Fatalf("verdict %q after failed write", got)
+	}
+}
+
+func TestEventStore_PruneDropsVerdict(t *testing.T) {
+	root := t.TempDir()
+	at := time.Date(2026, 9, 21, 17, 24, 58, 0, time.UTC)
+	writeJSONL(t, root, []EventRecord{
+		{ID: "gone", Type: "alert", Cam: "hik3", At: at, StillRel: "alerts/missing.jpg"},
+		{ID: "stay", Type: "alert", Cam: "hik3", At: at, StillRel: "alerts/keep.jpg"},
+	})
+	if err := os.MkdirAll(filepath.Join(root, "alerts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "alerts", "keep.jpg"), []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newEventStore(root, 7, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.SetVerdict("gone", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.SetVerdict("stay", "real"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	_, gone := s.verdicts["gone"]
+	stay := s.verdicts["stay"]
+	s.mu.Unlock()
+	if gone {
+		t.Fatal("verdict kept for pruned alert")
+	}
+	if stay != "real" {
+		t.Fatalf("kept verdict %q", stay)
+	}
+	page := s.queryEvents(eventQuery{Type: "alert", Limit: 10})
+	if page.FalseN != 0 || page.RealN != 1 {
+		t.Fatalf("counts false=%d real=%d", page.FalseN, page.RealN)
 	}
 }
 

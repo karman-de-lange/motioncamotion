@@ -27,6 +27,8 @@ type EventRecord struct {
 	Dets      []DetBox  `json:"dets,omitempty"`
 	MainScore float64   `json:"main_score,omitempty"`
 	MainClass string    `json:"main_class,omitempty"`
+	// Verdict is overlaid from verdicts.json: "false", "real", or empty.
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // EventStore writes media + append-only index; serves lists for the web UI.
@@ -37,9 +39,13 @@ type EventStore struct {
 	maxAge   time.Duration // 0 = no age prune
 	maxBytes int64         // 0 = no size prune
 	// live recent for SSE / UI (newest last)
-	recent  []EventRecord
-	recentN int
-	subs    map[chan EventRecord]struct{}
+	recent   []EventRecord
+	recentN  int
+	subs     map[chan EventRecord]struct{}
+	verdicts map[string]string // event id → "false" | "real"
+	// clipHold is a fire-time motion clip waiting on YOLO. Size prune must not
+	// delete it before the alert row exists to protect it.
+	clipHold map[string]int
 }
 
 func newEventStore(root string, maxAgeDays int, maxMB int) (*EventStore, error) {
@@ -59,6 +65,7 @@ func newEventStore(root string, maxAgeDays int, maxMB int) (*EventStore, error) 
 		maxBytes: int64(maxMB) << 20,
 		recentN:  2000,
 		subs:     make(map[chan EventRecord]struct{}),
+		verdicts: make(map[string]string),
 	}
 	if maxAgeDays <= 0 {
 		s.maxAge = 0
@@ -67,10 +74,166 @@ func newEventStore(root string, maxAgeDays int, maxMB int) (*EventStore, error) 
 		s.maxBytes = 0
 	}
 	_ = s.loadRecent()
+	if err := s.loadVerdicts(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
 func (s *EventStore) Root() string { return s.root }
+
+// HoldClip keeps rel from size prune until ReleaseClip. Open-episode clips are
+// written at motion time and only indexed when YOLO catches up.
+func (s *EventStore) HoldClip(rel string) {
+	if s == nil || rel == "" {
+		return
+	}
+	rel = filepath.ToSlash(rel)
+	s.mu.Lock()
+	if s.clipHold == nil {
+		s.clipHold = make(map[string]int)
+	}
+	s.clipHold[rel]++
+	s.mu.Unlock()
+}
+
+// ReleaseClip drops one hold from HoldClip.
+func (s *EventStore) ReleaseClip(rel string) {
+	if s == nil || rel == "" {
+		return
+	}
+	rel = filepath.ToSlash(rel)
+	s.mu.Lock()
+	n := s.clipHold[rel] - 1
+	if n <= 0 {
+		delete(s.clipHold, rel)
+	} else {
+		s.clipHold[rel] = n
+	}
+	s.mu.Unlock()
+}
+
+func (s *EventStore) verdictPath() string {
+	return filepath.Join(s.root, "verdicts.json")
+}
+
+func validEventID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, c := range id {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func verdictCounts(m map[string]string) (falseN, realN int) {
+	for _, v := range m {
+		switch v {
+		case "false":
+			falseN++
+		case "real":
+			realN++
+		}
+	}
+	return falseN, realN
+}
+
+func (s *EventStore) loadVerdicts() error {
+	b, err := os.ReadFile(s.verdictPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(strings.TrimSpace(string(b))) == 0 {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal(b, &m); err != nil {
+		return fmt.Errorf("verdicts.json: %w", err)
+	}
+	for id, v := range m {
+		if !validEventID(id) || (v != "false" && v != "real") {
+			continue
+		}
+		s.verdicts[id] = v
+	}
+	return nil
+}
+
+func (s *EventStore) writeVerdictsLocked() error {
+	b, err := json.MarshalIndent(s.verdicts, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	tmp := s.verdictPath() + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.verdictPath())
+}
+
+// SetVerdict marks an alert false or real. Empty verdict clears the mark.
+// Counts are the totals stored so far.
+func (s *EventStore) SetVerdict(id, verdict string) (stored string, falseN, realN int, err error) {
+	if !validEventID(id) {
+		return "", 0, 0, fmt.Errorf("bad id")
+	}
+	switch verdict {
+	case "", "false", "real":
+	default:
+		return "", 0, 0, fmt.Errorf("bad verdict")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.alertIDExistsLocked(id) {
+		return "", 0, 0, fmt.Errorf("unknown id")
+	}
+	prev, had := s.verdicts[id]
+	if verdict == "" {
+		delete(s.verdicts, id)
+	} else {
+		s.verdicts[id] = verdict
+	}
+	if err := s.writeVerdictsLocked(); err != nil {
+		if had {
+			s.verdicts[id] = prev
+		} else {
+			delete(s.verdicts, id)
+		}
+		return "", 0, 0, err
+	}
+	falseN, realN = verdictCounts(s.verdicts)
+	return verdict, falseN, realN, nil
+}
+
+func (s *EventStore) alertIDExistsLocked(id string) bool {
+	f, err := os.Open(s.index)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	sc.Buffer(buf, 1024*1024)
+	for sc.Scan() {
+		var rec EventRecord
+		if json.Unmarshal(sc.Bytes(), &rec) != nil {
+			continue
+		}
+		if rec.Type == "alert" && rec.ID == id {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *EventStore) loadRecent() error {
 	f, err := os.Open(s.index)
@@ -172,19 +335,22 @@ func (s *EventStore) List(limit int, typ string) []EventRecord {
 // eventQuery filters a jsonl scan. Before is a newest-first cursor (strictly older).
 // Since is inclusive; Until is exclusive.
 type eventQuery struct {
-	Type   string
-	Cam    string
-	Class  string
-	Before time.Time
-	Since  time.Time
-	Until  time.Time
-	Limit  int
+	Type    string
+	Cam     string
+	Class   string
+	Verdict string // "false", "real", "none" (unmarked), or empty
+	Before  time.Time
+	Since   time.Time
+	Until   time.Time
+	Limit   int
 }
 
 type eventPage struct {
 	Events  []EventRecord `json:"events"`
 	Total   int           `json:"total"`
 	HasMore bool          `json:"has_more"`
+	FalseN  int           `json:"false_n"`
+	RealN   int           `json:"real_n"`
 }
 
 func eventMatches(r EventRecord, q eventQuery) bool {
@@ -215,6 +381,19 @@ func eventMatches(r EventRecord, q eventQuery) bool {
 			return false
 		}
 	}
+	switch q.Verdict {
+	case "", "any":
+	case "none":
+		if r.Verdict != "" {
+			return false
+		}
+	case "false", "real":
+		if r.Verdict != q.Verdict {
+			return false
+		}
+	default:
+		return false
+	}
 	return true
 }
 
@@ -231,6 +410,7 @@ func (s *EventStore) queryEvents(q eventQuery) eventPage {
 		q.Limit = 100
 	}
 	page := eventPage{Events: []EventRecord{}}
+	page.FalseN, page.RealN = verdictCounts(s.verdicts)
 	f, err := os.Open(s.index)
 	if err != nil {
 		return page
@@ -249,6 +429,7 @@ func (s *EventStore) queryEvents(q eventQuery) eventPage {
 		if json.Unmarshal(line, &rec) != nil {
 			continue
 		}
+		rec.Verdict = s.verdicts[rec.ID]
 		if !eventMatches(rec, q) {
 			continue
 		}
@@ -446,7 +627,12 @@ func (s *EventStore) pruneLocked(now time.Time) (int, error) {
 		root := filepath.Clean(s.root)
 		// Alert records point at motion/*.h265 (shared clip). Treat those
 		// files as alerts so size prune cannot 404 a listed alert download.
+		// clipHold covers the same files before the alert row is written.
 		alertKeep := s.alertKeepPaths()
+		for rel := range s.clipHold {
+			p := filepath.Clean(filepath.Join(s.root, filepath.FromSlash(rel)))
+			alertKeep[p] = true
+		}
 		for _, f := range files {
 			rel, err := filepath.Rel(root, f.path)
 			if err != nil {
@@ -528,10 +714,30 @@ func (s *EventStore) rewriteIndexExisting() error {
 	if err := os.Rename(tmp, s.index); err != nil {
 		return err
 	}
+	alive := make(map[string]bool, len(kept))
+	for _, rec := range kept {
+		if rec.Type == "alert" {
+			alive[rec.ID] = true
+		}
+	}
 	if len(kept) > s.recentN {
 		kept = kept[len(kept)-s.recentN:]
 	}
 	s.recent = kept
+	next := make(map[string]string, len(s.verdicts))
+	for id, v := range s.verdicts {
+		if alive[id] {
+			next[id] = v
+		}
+	}
+	if len(next) != len(s.verdicts) {
+		old := s.verdicts
+		s.verdicts = next
+		if err := s.writeVerdictsLocked(); err != nil {
+			s.verdicts = old
+			return err
+		}
+	}
 	return nil
 }
 

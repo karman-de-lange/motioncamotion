@@ -66,20 +66,29 @@ func (v *vplDecoder) RGB(au []byte, rgbOut []byte, outW, outH int) int {
 }
 
 func (v *vplDecoder) decodeNV12(au []byte) (y, uv []byte, pitch, w, h, rc int) {
+	return v.copyNV12(func(y, uv []byte) (int, int, int) {
+		var cw, ch C.int
+		rc := int(C.vpl_decoder_nv12(v.dec,
+			(*C.uint8_t)(unsafe.Pointer(&au[0])), C.size_t(len(au)),
+			(*C.uint8_t)(unsafe.Pointer(&y[0])), C.int(len(y)),
+			(*C.uint8_t)(unsafe.Pointer(&uv[0])), C.int(len(uv)),
+			&cw, &ch))
+		return int(cw), int(ch), rc
+	})
+}
+
+func (v *vplDecoder) copyNV12(copy func(y, uv []byte) (w, h, rc int)) (y, uv []byte, pitch, w, h, rc int) {
 	if len(v.y) == 0 {
 		v.y = make([]byte, 1920*1088)
 		v.uv = make([]byte, 1920*544)
 	}
 	for i := 0; i < 2; i++ {
-		var cw, ch C.int
-		rc = int(C.vpl_decoder_nv12(v.dec,
-			(*C.uint8_t)(unsafe.Pointer(&au[0])), C.size_t(len(au)),
-			(*C.uint8_t)(unsafe.Pointer(&v.y[0])), C.int(len(v.y)),
-			(*C.uint8_t)(unsafe.Pointer(&v.uv[0])), C.int(len(v.uv)),
-			&cw, &ch))
-		w, h = int(cw), int(ch)
+		w, h, rc = copy(v.y, v.uv)
 		if rc != -2 {
 			break
+		}
+		if w <= 0 || h <= 0 {
+			return nil, nil, 0, 0, 0, rc
 		}
 		v.y = make([]byte, w*h)
 		v.uv = make([]byte, w*((h+1)/2))
@@ -102,6 +111,71 @@ func letterboxInferRGB(y, uv []byte, pitch, srcW, srcH, dstW, dstH int) []byte {
 		uv = nil
 	}
 	return nv12LetterboxRGB(y, uv, pitch, srcW, srcH, dstW, dstH)
+}
+
+func (v *vplDecoder) Feed(au []byte) int {
+	if v == nil || v.dec == nil || len(au) == 0 {
+		return -1
+	}
+	return int(C.vpl_decoder_feed(v.dec,
+		(*C.uint8_t)(unsafe.Pointer(&au[0])), C.size_t(len(au))))
+}
+
+func (v *vplDecoder) readHeld(y, uv []byte) (w, h, rc int) {
+	if v == nil || v.dec == nil || len(y) == 0 || len(uv) == 0 {
+		return 0, 0, -1
+	}
+	var cw, ch C.int
+	rc = int(C.vpl_decoder_take_nv12(v.dec,
+		(*C.uint8_t)(unsafe.Pointer(&y[0])), C.int(len(y)),
+		(*C.uint8_t)(unsafe.Pointer(&uv[0])), C.int(len(uv)),
+		&cw, &ch))
+	return int(cw), int(ch), rc
+}
+
+func (v *vplDecoder) TakeNV12() (y, uv []byte, pitch, w, h, rc int) {
+	if v == nil || v.dec == nil {
+		return nil, nil, 0, 0, 0, -1
+	}
+	return v.copyNV12(v.readHeld)
+}
+
+func (v *vplDecoder) JobFrames(segments [][]byte) (inferRGB, stillRGB []byte, stillW, stillH, frames int, ok bool) {
+	return jobFrames(v, segments, func(y, uv []byte, pitch, w, h int) ([]byte, []byte, int, int, bool) {
+		infer := letterboxInferRGB(y, uv, pitch, w, h, inferSize, inferSize)
+		if !rgbUsable(infer) {
+			return nil, nil, 0, 0, false
+		}
+		still, sw, sh := nv12FitRGB(y, uv, pitch, w, h, stillMaxW, stillMaxH)
+		if len(still) == 0 {
+			return nil, nil, 0, 0, false
+		}
+		return infer, still, sw, sh, true
+	})
+}
+
+func nv12FitRGB(y, uv []byte, pitch, srcW, srcH, maxW, maxH int) ([]byte, int, int) {
+	if srcW < 2 || srcH < 2 || maxW < 2 || maxH < 2 {
+		return nil, 0, 0
+	}
+	rgb := make([]byte, maxW*maxH*3)
+	var uvp *C.uint8_t
+	if len(uv) > 0 && useChroma(uv, pitch, srcW, srcH) {
+		uvp = (*C.uint8_t)(unsafe.Pointer(&uv[0]))
+	}
+	var yp *C.uint8_t
+	if len(y) > 0 {
+		yp = (*C.uint8_t)(unsafe.Pointer(&y[0]))
+	}
+	var ow, oh C.int
+	C.vpl_nv12_fit_rgb(yp, uvp, C.int(pitch), C.int(srcW), C.int(srcH),
+		(*C.uint8_t)(unsafe.Pointer(&rgb[0])), C.int(maxW), C.int(maxH), &ow, &oh)
+	w, h := int(ow), int(oh)
+	n := w * h * 3
+	if w < 2 || h < 2 || n > len(rgb) {
+		return nil, 0, 0
+	}
+	return rgb[:n], w, h
 }
 
 func (v *vplDecoder) RGBFit(au []byte, rgbOut []byte, maxW, maxH int) (outW, outH int, rc int) {

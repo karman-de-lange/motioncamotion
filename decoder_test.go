@@ -60,6 +60,10 @@ func (f *fakeRGBDec) RGBFit([]byte, []byte, int, int) (int, int, int) {
 
 func (f *fakeRGBDec) Close() {}
 
+func (f *fakeRGBDec) JobFrames([][]byte) ([]byte, []byte, int, int, int, bool) {
+	return nil, nil, 0, 0, 0, false
+}
+
 func TestDecodeRGBNearEnd_usesRGB(t *testing.T) {
 	f := &fakeRGBDec{}
 	rgb, frames, ok := decodeRGBNearEndWith(f, [][]byte{{1}, {2}}, inferSize, inferSize)
@@ -84,6 +88,10 @@ func (f *meanSeqDec) RGBFit([]byte, []byte, int, int) (int, int, int) {
 	return 0, 0, -1
 }
 func (f *meanSeqDec) Close() {}
+
+func (f *meanSeqDec) JobFrames([][]byte) ([]byte, []byte, int, int, int, bool) {
+	return nil, nil, 0, 0, 0, false
+}
 func (f *meanSeqDec) RGB(_ []byte, rgbOut []byte, outW, outH int) int {
 	if f.i >= len(f.means) {
 		return DecMoreData
@@ -191,6 +199,10 @@ func (f *seqRGBDec) RGBFit([]byte, []byte, int, int) (int, int, int) {
 	return 0, 0, -1
 }
 func (f *seqRGBDec) Close() {}
+
+func (f *seqRGBDec) JobFrames([][]byte) ([]byte, []byte, int, int, int, bool) {
+	return nil, nil, 0, 0, 0, false
+}
 func (f *seqRGBDec) RGB(_ []byte, rgbOut []byte, _, _ int) int {
 	if f.i >= len(f.frames) {
 		return DecMoreData
@@ -215,6 +227,160 @@ func TestLastIRAPIndex(t *testing.T) {
 	}
 	if i := lastIRAPIndex(nil); i != 0 {
 		t.Fatalf("nil %d want 0", i)
+	}
+}
+
+type feedTakeDec struct {
+	feeds   int
+	takes   int
+	feedRC  int
+	takeRC  int
+	w, h    int
+	plane   []byte
+	uvPlane []byte
+	yBuf    []byte
+	uvBuf   []byte
+}
+
+func (f *feedTakeDec) Feed([]byte) int {
+	f.feeds++
+	if f.feedRC != 0 {
+		return f.feedRC
+	}
+	return DecOK
+}
+
+func (f *feedTakeDec) TakeNV12() (y, uv []byte, pitch, w, h, rc int) {
+	f.takes++
+	if f.takeRC != 0 {
+		return nil, nil, 0, 0, 0, f.takeRC
+	}
+	w, h = f.w, f.h
+	yn := w * h
+	uvn := w * ((h + 1) / 2)
+	if len(f.yBuf) != yn {
+		f.yBuf = make([]byte, yn)
+	}
+	if len(f.uvBuf) != uvn {
+		f.uvBuf = make([]byte, uvn)
+	}
+	yFill := byte(80)
+	if f.plane != nil {
+		yFill = f.plane[f.takes-1]
+	}
+	uvFill := byte(128)
+	if f.uvPlane != nil {
+		uvFill = f.uvPlane[f.takes-1]
+	}
+	for i := range f.yBuf {
+		f.yBuf[i] = yFill
+	}
+	for i := range f.uvBuf {
+		f.uvBuf[i] = uvFill
+	}
+	return f.yBuf, f.uvBuf, w, w, h, 0
+}
+
+func TestDecodeRGB_jobFramesFeedTake(t *testing.T) {
+	idr := fakeHEVCKeyframe()
+	p := fakePFrame()
+	segs := [][]byte{idr, p, idr, {}, p}
+	paints := 0
+	paint := func(y, uv []byte, pitch, w, h int) ([]byte, []byte, int, int, bool) {
+		paints++
+		if len(y) != w*h || pitch != w {
+			return nil, nil, 0, 0, false
+		}
+		infer := make([]byte, inferSize*inferSize*3)
+		for i := range infer {
+			infer[i] = 40
+		}
+		still := make([]byte, w*h*3)
+		still[0] = 41
+		return infer, still, w, h, true
+	}
+
+	okDec := &feedTakeDec{w: 16, h: 8}
+	infer, still, sw, sh, frames, ok := jobFrames(okDec, segs, paint)
+	if !ok || frames != 2 || okDec.feeds != 2 || okDec.takes != 2 || paints != 1 {
+		t.Fatalf("ok=%v frames=%d feeds=%d takes=%d paints=%d", ok, frames, okDec.feeds, okDec.takes, paints)
+	}
+	if len(infer) != inferSize*inferSize*3 || infer[0] != 40 {
+		t.Fatalf("infer len=%d byte0=%d", len(infer), infer[0])
+	}
+	if sw != 16 || sh != 8 || len(still) != 16*8*3 || still[0] != 41 {
+		t.Fatalf("still %dx%d len=%d byte0=%d", sw, sh, len(still), still[0])
+	}
+
+	noFrame := &feedTakeDec{feedRC: DecMoreData, w: 16, h: 8}
+	_, _, _, _, _, ok = jobFrames(noFrame, segs, paint)
+	if ok || noFrame.takes != 0 {
+		t.Fatalf("no frame ok=%v takes=%d", ok, noFrame.takes)
+	}
+
+	badTake := &feedTakeDec{takeRC: -1, w: 16, h: 8}
+	_, still, _, _, frames, ok = jobFrames(badTake, segs, paint)
+	if ok || still != nil || frames != 2 || badTake.takes != 2 {
+		t.Fatalf("bad take ok=%v frames=%d takes=%d still=%v", ok, frames, badTake.takes, still)
+	}
+
+	var gotY, gotUV byte
+	paintKept := func(y, uv []byte, pitch, w, h int) ([]byte, []byte, int, int, bool) {
+		paints++
+		gotY, gotUV = y[0], uv[0]
+		inf := make([]byte, inferSize*inferSize*3)
+		inf[0] = y[0]
+		st := make([]byte, w*h*3)
+		st[0] = y[0]
+		return inf, st, w, h, true
+	}
+	kept := &feedTakeDec{w: 16, h: 8, plane: []byte{80, 0}, uvPlane: []byte{90, 10}}
+	paints = 0
+	infer, still, sw, sh, frames, ok = jobFrames(kept, [][]byte{idr, p}, paintKept)
+	if !ok || frames != 2 || kept.takes != 2 || paints != 1 || gotY != 80 || gotUV != 90 {
+		t.Fatalf("black tail ok=%v frames=%d takes=%d paints=%d y=%d uv=%d", ok, frames, kept.takes, paints, gotY, gotUV)
+	}
+	if infer[0] != 80 || still[0] != 80 || sw != 16 || sh != 8 {
+		t.Fatalf("kept first frame infer=%d still=%d %dx%d", infer[0], still[0], sw, sh)
+	}
+
+	limited := &feedTakeDec{w: 16, h: 8, plane: []byte{80, 16}, uvPlane: []byte{90, 10}}
+	paints = 0
+	gotY, gotUV = 0, 0
+	infer, still, sw, sh, frames, ok = jobFrames(limited, [][]byte{idr, p}, paintKept)
+	if !ok || frames != 2 || limited.takes != 2 || paints != 1 || gotY != 80 || gotUV != 90 {
+		t.Fatalf("Y=16 tail ok=%v frames=%d takes=%d paints=%d y=%d uv=%d", ok, frames, limited.takes, paints, gotY, gotUV)
+	}
+}
+
+func TestDecodeRGB_jobFramesRGBUsesLastUsable(t *testing.T) {
+	segs := [][]byte{{1}, {2}, {3}}
+	infer, still, sw, sh, frames, ok := jobFramesRGB(segs,
+		func(seg, dst []byte) int {
+			fill := byte(40)
+			if seg[0] == 2 {
+				fill = 90
+			}
+			if seg[0] == 3 {
+				fill = 0
+			}
+			for i := range dst {
+				dst[i] = fill
+			}
+			return DecOK
+		},
+		func(seg, dst []byte) (int, int, int) {
+			for i := range dst {
+				dst[i] = seg[0]
+			}
+			return 32, 16, DecOK
+		},
+	)
+	if !ok || frames != 3 || sw != 32 || sh != 16 {
+		t.Fatalf("ok=%v frames=%d %dx%d", ok, frames, sw, sh)
+	}
+	if infer[0] != 90 || still[0] != 2 {
+		t.Fatalf("infer=%d still=%d want last usable seg 2", infer[0], still[0])
 	}
 }
 

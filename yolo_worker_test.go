@@ -81,12 +81,14 @@ func TestBeginAlertClip_prefersCapture(t *testing.T) {
 }
 
 type detectSpyDec struct {
-	rgbN int
-	fitN int
-	outW int
-	outH int
-	fitW int
-	fitH int
+	rgbN  int
+	fitN  int
+	feedN int
+	takeN int
+	outW  int
+	outH  int
+	fitW  int
+	fitH  int
 }
 
 func (f *detectSpyDec) Thumb([]byte, []byte) int { return -1 }
@@ -114,6 +116,33 @@ func (f *detectSpyDec) RGBFit(_ []byte, rgbOut []byte, maxW, maxH int) (int, int
 }
 
 func (f *detectSpyDec) Close() {}
+
+func (f *detectSpyDec) Feed(au []byte) int {
+	if len(au) == 0 {
+		return -1
+	}
+	f.feedN++
+	return DecOK
+}
+
+func (f *detectSpyDec) TakeNV12() (y, uv []byte, pitch, w, h, rc int) {
+	f.takeN++
+	w, h = stillMaxW, stillMaxH
+	y = bytes.Repeat([]byte{80}, w*h)
+	uv = bytes.Repeat([]byte{128}, w*((h+1)/2))
+	return y, uv, w, w, h, 0
+}
+
+func (f *detectSpyDec) JobFrames(segments [][]byte) ([]byte, []byte, int, int, int, bool) {
+	return jobFrames(f, segments, func(y, uv []byte, pitch, w, h int) ([]byte, []byte, int, int, bool) {
+		if w < 2 || h < 2 || len(y) < w*h {
+			return nil, nil, 0, 0, false
+		}
+		infer := bytes.Repeat([]byte{80}, inferSize*inferSize*3)
+		still := bytes.Repeat([]byte{80}, w*h*3)
+		return infer, still, w, h, true
+	})
+}
 
 func stubPersonInfer(t *testing.T) {
 	t.Helper()
@@ -153,7 +182,13 @@ func TestProcessDetect_infer640GalleryFit(t *testing.T) {
 		sessions++
 		return spy, 0
 	}
-	stubPersonInfer(t)
+	hookInfer(func(rgb []byte, _ float64) ([]DetBox, float64, error) {
+		if len(rgb) != inferSize*inferSize*3 {
+			t.Errorf("infer len %d want %d", len(rgb), inferSize*inferSize*3)
+		}
+		return []DetBox{{Class: "person", Score: 0.9, X1: 8, Y1: 8, X2: 40, Y2: 40, ClassID: 0}}, 1, nil
+	})
+	t.Cleanup(func() { hookInfer(nil) })
 
 	logQ := make(chan string, 64)
 	occ := newOccupancy()
@@ -167,19 +202,24 @@ func TestProcessDetect_infer640GalleryFit(t *testing.T) {
 		SAD:      4,
 		Segments: [][]byte{idr, p, idr, p},
 	}
+	rel := motionClipRel(ev)
+	store.HoldClip(rel)
 	processDetect(ev, true, logQ, store, nil, yc, occ, nil)
+	store.mu.Lock()
+	holdN := store.clipHold[rel]
+	store.mu.Unlock()
+	if holdN != 0 {
+		t.Fatalf("clip hold %d after successful detect", holdN)
+	}
 
-	if sessions != 2 {
-		t.Fatalf("decoder sessions=%d want 2 (infer+gallery)", sessions)
+	if sessions != 1 {
+		t.Fatalf("decoder sessions=%d want 1", sessions)
 	}
-	if spy.rgbN != 4 {
-		t.Fatalf("RGB calls=%d want 4 (lastIRAPIndex slice?)", spy.rgbN)
+	if spy.feedN != 2 || spy.takeN != 2 {
+		t.Fatalf("feed=%d take=%d want 2, 2", spy.feedN, spy.takeN)
 	}
-	if spy.outW != inferSize || spy.outH != inferSize {
-		t.Fatalf("RGB size %dx%d want %d", spy.outW, spy.outH, inferSize)
-	}
-	if spy.fitN == 0 || spy.fitW != stillMaxW || spy.fitH != stillMaxH {
-		t.Fatalf("RGBFit n=%d %dx%d want %dx%d", spy.fitN, spy.fitW, spy.fitH, stillMaxW, stillMaxH)
+	if spy.rgbN != 0 || spy.fitN != 0 {
+		t.Fatalf("RGB=%d RGBFit=%d want 0", spy.rgbN, spy.fitN)
 	}
 
 	mot := store.List(20, "motion")
@@ -206,6 +246,23 @@ func TestProcessDetect_infer640GalleryFit(t *testing.T) {
 		if _, err := os.Stat(abs); !os.IsNotExist(err) {
 			t.Fatalf("%s clip written from detect GOP", rec.Type)
 		}
+	}
+}
+
+func TestProcessDetect_openReleasesClipHold(t *testing.T) {
+	store, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := DetectEvent{Cam: "c1", At: time.Now(), Label: "motion", SAD: 4}
+	rel := motionClipRel(ev)
+	store.HoldClip(rel)
+	processDetect(ev, true, make(chan string, 4), store, nil, yoloConfig{}, newOccupancy(), nil)
+	store.mu.Lock()
+	n := store.clipHold[rel]
+	store.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("clip hold %d after detect job", n)
 	}
 }
 

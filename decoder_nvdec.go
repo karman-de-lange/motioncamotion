@@ -63,6 +63,18 @@ func (v *nvdecDecoder) RGBFit(au []byte, rgbOut []byte, maxW, maxH int) (outW, o
 	return int(cW), int(cH), rc
 }
 
+func (v *nvdecDecoder) JobFrames(segments [][]byte) (inferRGB, stillRGB []byte, stillW, stillH, frames int, ok bool) {
+	dec, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || dec == nil {
+		return nil, nil, 0, 0, 0, false
+	}
+	defer dec.Close()
+	return jobFramesRGB(segments,
+		func(seg, dst []byte) int { return v.RGB(seg, dst, inferSize, inferSize) },
+		func(seg, dst []byte) (int, int, int) { return dec.RGBFit(seg, dst, stillMaxW, stillMaxH) },
+	)
+}
+
 func (v *nvdecDecoder) Close() {
 	if v == nil || v.dec == nil {
 		return

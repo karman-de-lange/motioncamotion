@@ -34,6 +34,8 @@ type FrameDecoder interface {
 	RGB(au []byte, rgbOut []byte, outW, outH int) int
 	// RGBFit scales into maxW×maxH preserving aspect; returns actual size.
 	RGBFit(au []byte, rgbOut []byte, maxW, maxH int) (outW, outH int, rc int)
+	// JobFrames decodes one GOP into the 640 infer image and the fit still.
+	JobFrames(segments [][]byte) (inferRGB, stillRGB []byte, stillW, stillH, frames int, ok bool)
 	Close()
 }
 
@@ -46,13 +48,110 @@ func NewFrameDecoder(codec int) (d FrameDecoder, rc int) {
 	return openFrameDecoder(codec)
 }
 
-func decodeRGBNearEnd(segments [][]byte, outW, outH int) ([]byte, int, bool) {
+func decodeJobFrames(segments [][]byte) (inferRGB, stillRGB []byte, stillW, stillH, frames int, ok bool) {
 	dec, rc := NewFrameDecoder(CodecHEVC)
 	if rc != 0 || dec == nil {
-		return nil, 0, false
+		return nil, nil, 0, 0, 0, false
 	}
 	defer dec.Close()
-	return decodeRGBFeedWith(dec, segments, outW, outH)
+	return dec.JobFrames(segments)
+}
+
+func jobFrames(src interface {
+	Feed([]byte) int
+	TakeNV12() (y, uv []byte, pitch, w, h, rc int)
+}, segments [][]byte, paint func(y, uv []byte, pitch, w, h int) (inferRGB, stillRGB []byte, stillW, stillH int, ok bool)) (inferRGB, stillRGB []byte, stillW, stillH, frames int, ok bool) {
+	if start := lastIRAPIndex(segments); start > 0 {
+		segments = segments[start:]
+	}
+	var keptY, keptUV []byte
+	var keptPitch, keptW, keptH int
+	for _, seg := range segments {
+		if len(seg) == 0 {
+			continue
+		}
+		if src.Feed(seg) != DecOK {
+			continue
+		}
+		frames++
+		y, uv, pitch, w, h, rc := src.TakeNV12()
+		if rc != 0 || w <= 0 || h <= 0 || !yPlaneUsable(y, w, h) {
+			continue
+		}
+		keptY = append(keptY[:0], y[:w*h]...)
+		uvn := w * ((h + 1) / 2)
+		if len(uv) < uvn {
+			uvn = len(uv)
+		}
+		keptUV = append(keptUV[:0], uv[:uvn]...)
+		keptPitch, keptW, keptH = pitch, w, h
+	}
+	if keptW < 2 {
+		return nil, nil, 0, 0, frames, false
+	}
+	inferRGB, stillRGB, stillW, stillH, ok = paint(keptY, keptUV, keptPitch, keptW, keptH)
+	if !ok || len(inferRGB) == 0 || len(stillRGB) == 0 || stillW < 2 || stillH < 2 {
+		return nil, nil, 0, 0, frames, false
+	}
+	return inferRGB, stillRGB, stillW, stillH, frames, true
+}
+
+func jobFramesRGB(segments [][]byte, rgb func(seg, dst []byte) int, fit func(seg, dst []byte) (w, h, rc int)) (inferRGB, stillRGB []byte, stillW, stillH, frames int, ok bool) {
+	if start := lastIRAPIndex(segments); start > 0 {
+		segments = segments[start:]
+	}
+	buf := make([]byte, inferSize*inferSize*3)
+	var infer []byte
+	usableAt := -1
+	for i, seg := range segments {
+		if len(seg) == 0 {
+			continue
+		}
+		if rgb(seg, buf) != DecOK {
+			continue
+		}
+		frames++
+		if !rgbUsable(buf) {
+			continue
+		}
+		infer = append(infer[:0], buf...)
+		usableAt = i
+	}
+	if usableAt < 0 {
+		return nil, nil, 0, 0, frames, false
+	}
+	fitBuf := make([]byte, stillMaxW*stillMaxH*3)
+	for i, seg := range segments {
+		if len(seg) == 0 {
+			continue
+		}
+		w, h, r := fit(seg, fitBuf)
+		if i != usableAt {
+			continue
+		}
+		n := w * h * 3
+		if r != DecOK || w < 2 || h < 2 || n > len(fitBuf) {
+			return nil, nil, 0, 0, frames, false
+		}
+		return append([]byte(nil), infer...), append([]byte(nil), fitBuf[:n]...), w, h, frames, true
+	}
+	return nil, nil, 0, 0, frames, false
+}
+
+func yPlaneUsable(y []byte, w, h int) bool {
+	if w < 2 || h < 2 || len(y) < w*h {
+		return false
+	}
+	var s, n int
+	for row := h / 4; row < 3*h/4; row += 2 {
+		off := row * w
+		for x := 0; x < w; x += 8 {
+			s += int(y[off+x])
+			n++
+		}
+	}
+	// Y=16..29 is limited-range black after BT.601 (Y-16)*298/256, RGB mean < 16.
+	return n > 0 && s/n >= 30
 }
 
 func decodeRGBNearEndWith(dec FrameDecoder, segments [][]byte, outW, outH int) ([]byte, int, bool) {
@@ -86,40 +185,6 @@ func decodeRGBFeedWith(dec FrameDecoder, segments [][]byte, outW, outH int) ([]b
 		return nil, frames, false
 	}
 	return last, frames, true
-}
-
-func decodeRGBFitNearEnd(segments [][]byte, maxW, maxH int) ([]byte, int, int, int, bool) {
-	dec, rc := NewFrameDecoder(CodecHEVC)
-	if rc != 0 || dec == nil {
-		return nil, 0, 0, 0, false
-	}
-	defer dec.Close()
-	if start := lastIRAPIndex(segments); start > 0 {
-		segments = segments[start:]
-	}
-	buf := make([]byte, maxW*maxH*3)
-	var last []byte
-	var lw, lh, frames int
-	for _, seg := range segments {
-		if len(seg) == 0 {
-			continue
-		}
-		w, h, r := dec.RGBFit(seg, buf, maxW, maxH)
-		if r != DecOK || w <= 0 || h <= 0 {
-			continue
-		}
-		frames++
-		n := w * h * 3
-		if n > len(buf) {
-			continue
-		}
-		last = append(last[:0], buf[:n]...)
-		lw, lh = w, h
-	}
-	if len(last) == 0 {
-		return nil, 0, 0, frames, false
-	}
-	return last, lw, lh, frames, true
 }
 
 func rgbCenterMean(rgb []byte) int {

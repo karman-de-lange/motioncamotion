@@ -33,6 +33,7 @@ func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, sto
 			return
 		}
 		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+		rw.Header().Set("Cache-Control", "no-store")
 		_, _ = rw.Write([]byte(webIndexHTML(workers)))
 	})
 
@@ -73,15 +74,46 @@ func runWebServer(ctx context.Context, addr string, workers []*CameraWorker, sto
 			}
 		}
 		page := store.queryEvents(eventQuery{
-			Type:   r.URL.Query().Get("type"),
-			Cam:    r.URL.Query().Get("cam"),
-			Class:  r.URL.Query().Get("class"),
-			Before: parseQueryTime(r.URL.Query().Get("before")),
-			Since:  parseQueryTime(r.URL.Query().Get("since")),
-			Until:  parseQueryTime(r.URL.Query().Get("until")),
-			Limit:  limit,
+			Type:    r.URL.Query().Get("type"),
+			Cam:     r.URL.Query().Get("cam"),
+			Class:   r.URL.Query().Get("class"),
+			Verdict: r.URL.Query().Get("verdict"),
+			Before:  parseQueryTime(r.URL.Query().Get("before")),
+			Since:   parseQueryTime(r.URL.Query().Get("since")),
+			Until:   parseQueryTime(r.URL.Query().Get("until")),
+			Limit:   limit,
 		})
 		writeJSON(rw, page)
+	})
+
+	mux.HandleFunc("/api/events/verdict", func(rw http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(rw, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		if store == nil {
+			http.Error(rw, "no store", http.StatusServiceUnavailable)
+			return
+		}
+		var body struct {
+			ID      string `json:"id"`
+			Verdict string `json:"verdict"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+		stored, falseN, realN, err := store.SetVerdict(body.ID, body.Verdict)
+		if err != nil {
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(rw, map[string]interface{}{
+			"id":      body.ID,
+			"verdict": stored,
+			"false_n": falseN,
+			"real_n":  realN,
+		})
 	})
 
 	mux.HandleFunc("/api/events/stream", func(rw http.ResponseWriter, r *http.Request) {

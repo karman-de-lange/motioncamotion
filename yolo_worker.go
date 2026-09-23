@@ -168,7 +168,10 @@ func beginAlertClip(ev DetectEvent, clipRel string, capture func(string, string,
 }
 
 func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *EventStore, inf *C.OVInfer, yc yoloConfig, occ *occupancy, capture func(string, string, time.Time)) {
-	mainRGB, frames, ok := decodeRGBNearEnd(ev.Segments, inferSize, inferSize)
+	if saveClip && store != nil {
+		defer store.ReleaseClip(motionClipRel(ev))
+	}
+	mainRGB, stillRGB, stillW, stillH, frames, ok := decodeJobFrames(ev.Segments)
 	if !ok {
 		logQ <- fmt.Sprintf("%s: main decode failed aus=%d", ev.Cam, len(ev.Segments))
 		if saveClip && store != nil {
@@ -182,24 +185,9 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 		return
 	}
 
-	var stillRGB []byte
-	var stillW, stillH int
-	loadGallery := func() {
-		if stillRGB != nil {
-			return
-		}
-		rgb, w, h, _, fitOK := decodeRGBFitNearEnd(ev.Segments, stillMaxW, stillMaxH)
-		if fitOK {
-			stillRGB, stillW, stillH = rgb, w, h
-			return
-		}
-		stillRGB, stillW, stillH = mainRGB, inferSize, inferSize
-	}
-
 	dets, mainMS, err := inferMulti(inf, mainRGB, yc.MainConf)
 	clipRel := ""
 	if saveClip && store != nil {
-		loadGallery()
 		var stillPlain []byte
 		if boxes := motionBlobDet(ev, stillW, stillH); len(boxes) > 0 {
 			if jpg, e := AnnotateRGB(stillRGB, stillW, stillH, boxes, 90); e == nil {
@@ -241,7 +229,6 @@ func processDetect(ev DetectEvent, saveClip bool, logQ chan<- string, store *Eve
 	logQ <- fmt.Sprintf("%s: main frames=%d infer=%.0fms pass=%v dets=%d fresh=%d score=%.2f %s",
 		ev.Cam, frames, mainMS, mainPass, len(dets), len(fresh), topScore, topName)
 
-	loadGallery()
 	annDets := dets
 	if stillW != inferSize || stillH != inferSize {
 		annDets = mapDetsLetterboxToStill(dets, inferSize, inferSize, stillW, stillH)

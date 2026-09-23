@@ -15,6 +15,7 @@ struct VPLDecoder {
     mfxVideoParam dec_par;
     int dec_inited;
     mfxU32 codec_id;
+    mfxFrameSurface1 *held;
 };
 
 static void downscale_y(const uint8_t *src, int src_w, int src_h, int src_pitch,
@@ -191,6 +192,13 @@ static void fit_size(int src_w, int src_h, int max_w, int max_h, int *out_w, int
 static void release_surf(mfxFrameSurface1 *s) {
     if (s && s->FrameInterface && s->FrameInterface->Release) {
         s->FrameInterface->Release(s);
+    }
+}
+
+static void release_held(VPLDecoder *d) {
+    if (d && d->held) {
+        release_surf(d->held);
+        d->held = NULL;
     }
 }
 
@@ -532,6 +540,87 @@ int vpl_decoder_thumb_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
     return rc;
 }
 
+int vpl_decoder_feed(VPLDecoder *d, const uint8_t *data, size_t len) {
+    if (!d || !data || len == 0) {
+        return -1;
+    }
+    mfxFrameSurface1 *decoded = NULL;
+    int rc = decode_one_frame(d, data, len, &decoded, 1);
+    if (rc != 0) {
+        return rc;
+    }
+    release_held(d);
+    d->held = decoded;
+    return 0;
+}
+
+static int copy_surface_nv12(mfxFrameSurface1 *decoded,
+                             uint8_t *y_out, int y_cap, uint8_t *uv_out, int uv_cap,
+                             int *out_w, int *out_h) {
+    mfxStatus sts = decoded->FrameInterface->Map(decoded, MFX_MAP_READ);
+    if (sts != MFX_ERR_NONE) {
+        return -100 - (int)sts;
+    }
+    const uint8_t *y = NULL;
+    int pitch = 0, w = 0, h = 0;
+    if (surface_y(decoded, &y, &pitch, &w, &h) != 0) {
+        decoded->FrameInterface->Unmap(decoded);
+        return -96;
+    }
+    *out_w = w;
+    *out_h = h;
+    int yneed = w * h;
+    int uvneed = w * ((h + 1) / 2);
+    if (y_cap < yneed || uv_cap < uvneed) {
+        decoded->FrameInterface->Unmap(decoded);
+        return -2;
+    }
+    for (int row = 0; row < h; row++) {
+        memcpy(y_out + (size_t)row * (size_t)w, y + (size_t)row * (size_t)pitch, (size_t)w);
+    }
+    int uh = (h + 1) / 2;
+    int surf_h = decoded->Info.Height > 0 ? (int)decoded->Info.Height : h;
+    const uint8_t *uv_base = surface_uv(decoded, pitch, surf_h);
+    if (uv_base && uh > 0) {
+        const uint8_t *uv = uv_base + (size_t)(decoded->Info.CropY / 2) * (size_t)pitch
+                                    + (size_t)(decoded->Info.CropX & ~1);
+        for (int row = 0; row < uh; row++) {
+            memcpy(uv_out + (size_t)row * (size_t)w, uv + (size_t)row * (size_t)pitch, (size_t)w);
+        }
+    } else if (uvneed > 0) {
+        memset(uv_out, 0, (size_t)uvneed);
+    }
+    decoded->FrameInterface->Unmap(decoded);
+    return 0;
+}
+
+int vpl_decoder_take_nv12(VPLDecoder *d,
+                          uint8_t *y_out, int y_cap, uint8_t *uv_out, int uv_cap,
+                          int *out_w, int *out_h) {
+    if (!d || !d->held || !y_out || !uv_out || !out_w || !out_h) {
+        return -1;
+    }
+    int rc = copy_surface_nv12(d->held, y_out, y_cap, uv_out, uv_cap, out_w, out_h);
+    if (rc == -2) {
+        return rc;
+    }
+    release_held(d);
+    return rc;
+}
+
+void vpl_nv12_fit_rgb(const uint8_t *y, const uint8_t *uv, int pitch, int src_w, int src_h,
+                      uint8_t *rgb, int max_w, int max_h, int *out_w, int *out_h) {
+    int dw = 0, dh = 0;
+    fit_size(src_w, src_h, max_w, max_h, &dw, &dh);
+    nv12_to_rgb_fill(y, uv, pitch, src_w, src_h, rgb, dw, dh);
+    if (out_w) {
+        *out_w = dw;
+    }
+    if (out_h) {
+        *out_h = dh;
+    }
+}
+
 int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
                      uint8_t *y_out, int y_cap, uint8_t *uv_out, int uv_cap,
                      int *out_w, int *out_h) {
@@ -561,48 +650,9 @@ int vpl_decoder_nv12(VPLDecoder *d, const uint8_t *data, size_t len,
     if (rc != 0) {
         return rc;
     }
-
-    mfxStatus sts = decoded->FrameInterface->Map(decoded, MFX_MAP_READ);
-    if (sts != MFX_ERR_NONE) {
-        decoded->FrameInterface->Release(decoded);
-        return -100 - (int)sts;
-    }
-
-    const uint8_t *y = NULL;
-    int pitch = 0, w = 0, h = 0;
-    if (surface_y(decoded, &y, &pitch, &w, &h) != 0) {
-        decoded->FrameInterface->Unmap(decoded);
-        decoded->FrameInterface->Release(decoded);
-        return -96;
-    }
-    *out_w = w;
-    *out_h = h;
-    int yneed = w * h;
-    int uvneed = w * ((h + 1) / 2);
-    if (y_cap < yneed || uv_cap < uvneed) {
-        decoded->FrameInterface->Unmap(decoded);
-        decoded->FrameInterface->Release(decoded);
-        return -2;
-    }
-    for (int row = 0; row < h; row++) {
-        memcpy(y_out + (size_t)row * (size_t)w, y + (size_t)row * (size_t)pitch, (size_t)w);
-    }
-    int uh = (h + 1) / 2;
-    int surf_h = decoded->Info.Height > 0 ? (int)decoded->Info.Height : h;
-    const uint8_t *uv_base = surface_uv(decoded, pitch, surf_h);
-    if (uv_base && uh > 0) {
-        const uint8_t *uv = uv_base + (size_t)(decoded->Info.CropY / 2) * (size_t)pitch
-                                    + (size_t)(decoded->Info.CropX & ~1);
-        for (int row = 0; row < uh; row++) {
-            memcpy(uv_out + (size_t)row * (size_t)w, uv + (size_t)row * (size_t)pitch, (size_t)w);
-        }
-    } else if (uvneed > 0) {
-        memset(uv_out, 0, (size_t)uvneed);
-    }
-
-    decoded->FrameInterface->Unmap(decoded);
-    decoded->FrameInterface->Release(decoded);
-    return 0;
+    rc = copy_surface_nv12(decoded, y_out, y_cap, uv_out, uv_cap, out_w, out_h);
+    release_surf(decoded);
+    return rc;
 }
 
 int vpl_decoder_rgb_fit(VPLDecoder *d, const uint8_t *data, size_t len,
@@ -659,6 +709,7 @@ void vpl_decoder_free(VPLDecoder *d) {
     if (!d) {
         return;
     }
+    release_held(d);
     if (d->dec_inited) {
         MFXVideoDECODE_Close(d->session);
     }

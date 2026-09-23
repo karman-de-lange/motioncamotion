@@ -631,3 +631,171 @@ func TestVPLRGB_decodeRGBNearEndNotGreen(t *testing.T) {
 	}
 	assertInferRGB(t, rgb, "near-end")
 }
+
+func TestVPLRGB_copyNV12Resize(t *testing.T) {
+	v := &vplDecoder{}
+	calls := 0
+	const w, h = 2000, 1080
+	y, uv, pitch, gotW, gotH, rc := v.copyNV12(func(ybuf, uvbuf []byte) (int, int, int) {
+		calls++
+		yneed := w * h
+		uvneed := w * ((h + 1) / 2)
+		if len(ybuf) < yneed || len(uvbuf) < uvneed {
+			return w, h, -2
+		}
+		ybuf[0] = 7
+		uvbuf[0] = 9
+		return w, h, 0
+	})
+	if rc != 0 || calls != 2 || gotW != w || gotH != h || pitch != w {
+		t.Fatalf("rc=%d calls=%d %dx%d pitch=%d", rc, calls, gotW, gotH, pitch)
+	}
+	if len(y) != w*h || len(uv) != w*((h+1)/2) || y[0] != 7 || uv[0] != 9 {
+		t.Fatalf("y=%d uv=%d", len(y), len(uv))
+	}
+
+	zero := &vplDecoder{}
+	calls = 0
+	_, _, _, _, _, rc = zero.copyNV12(func([]byte, []byte) (int, int, int) {
+		calls++
+		return 0, 0, -2
+	})
+	if rc != -2 || calls != 1 {
+		t.Fatalf("zero size rc=%d calls=%d", rc, calls)
+	}
+
+	stuck := &vplDecoder{}
+	calls = 0
+	_, _, _, _, _, rc = stuck.copyNV12(func([]byte, []byte) (int, int, int) {
+		calls++
+		return 3000, 2000, -2
+	})
+	if rc != -2 || calls != 2 {
+		t.Fatalf("second -2 rc=%d calls=%d", rc, calls)
+	}
+}
+
+func TestVPLRGB_jobFramesOneSurface(t *testing.T) {
+	data, err := os.ReadFile("clips/hik1_20260611_224034.h265")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aus := hevcGOPAUs(data, true)
+	if len(aus) < 2 {
+		t.Fatalf("last GOP too short: %d AUs", len(aus))
+	}
+	dec, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || dec == nil {
+		t.Fatalf("decoder new %d", rc)
+	}
+	defer dec.Close()
+	infer, still, sw, sh, frames, ok := dec.JobFrames(aus)
+	if !ok || frames < 2 {
+		t.Fatalf("ok=%v frames=%d", ok, frames)
+	}
+	if len(infer) != inferSize*inferSize*3 {
+		t.Fatalf("infer len %d", len(infer))
+	}
+	near, nearRC := NewFrameDecoder(CodecHEVC)
+	if nearRC != 0 || near == nil {
+		t.Fatalf("near decoder new %d", nearRC)
+	}
+	defer near.Close()
+	want, wantFrames, wantOK := decodeRGBNearEndWith(near, aus, inferSize, inferSize)
+	if !wantOK || wantFrames != frames || !bytes.Equal(infer, want) {
+		t.Fatalf("job infer != near-end ok=%v frames %d vs %d equal=%v", wantOK, frames, wantFrames, bytes.Equal(infer, want))
+	}
+	assertFitRGB(t, still, sw, sh, "job still")
+	if sw <= inferSize && sh <= inferSize {
+		t.Fatalf("still %dx%d is not a fit above the 640 infer image", sw, sh)
+	}
+}
+
+func assertFitRGB(t *testing.T, rgb []byte, w, h int, what string) {
+	t.Helper()
+	if w < 2 || h < 2 || len(rgb) != w*h*3 {
+		t.Fatalf("%s %dx%d len %d", what, w, h, len(rgb))
+	}
+	var s, n, greenish, magentish int
+	maxd := 0
+	for y := h / 4; y < 3*h/4; y += 4 {
+		off := y * w * 3
+		for x := w / 8; x < 7*w/8; x += 8 {
+			i := off + x*3
+			r, g, b := int(rgb[i]), int(rgb[i+1]), int(rgb[i+2])
+			s += r + g + b
+			n += 3
+			d := absInt(r - g)
+			if v := absInt(g - b); v > d {
+				d = v
+			}
+			if v := absInt(r - b); v > d {
+				d = v
+			}
+			if d > maxd {
+				maxd = d
+			}
+			if g > r+48 && g > b+48 {
+				greenish++
+			}
+			if r > g+48 && b > g+48 {
+				magentish++
+			}
+		}
+	}
+	if n == 0 || s/n < 16 {
+		t.Fatalf("%s unusable", what)
+	}
+	if maxd == 0 {
+		t.Fatalf("%s grayscale", what)
+	}
+	samples := n / 3
+	if greenish*5 >= samples*2 || magentish*5 >= samples*2 {
+		t.Fatalf("%s green/purple", what)
+	}
+}
+
+func TestVPLRGB_takeKeepsSurfaceOnMinusTwo(t *testing.T) {
+	data, err := os.ReadFile("clips/hik1_20260611_224034.h265")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aus := hevcGOPAUs(data, true)
+	dec, rc := NewFrameDecoder(CodecHEVC)
+	if rc != 0 || dec == nil {
+		t.Fatalf("decoder new %d", rc)
+	}
+	defer dec.Close()
+	v := dec.(*vplDecoder)
+	fed := false
+	for _, au := range aus {
+		if len(au) == 0 {
+			continue
+		}
+		if v.Feed(au) == DecOK {
+			fed = true
+			break
+		}
+	}
+	if !fed {
+		t.Fatal("no frame")
+	}
+	tiny := make([]byte, 8)
+	w, h, rc := v.readHeld(tiny, tiny)
+	if rc != -2 || w < 2 || h < 2 {
+		t.Fatalf("small take rc=%d %dx%d", rc, w, h)
+	}
+	y := make([]byte, w*h)
+	uv := make([]byte, w*((h+1)/2))
+	w2, h2, rc := v.readHeld(y, uv)
+	if rc != 0 || w2 != w || h2 != h {
+		t.Fatalf("second take rc=%d %dx%d", rc, w2, h2)
+	}
+	sum := 0
+	for i := 0; i < len(y); i += 64 {
+		sum += int(y[i])
+	}
+	if sum == 0 {
+		t.Fatal("second take dropped the picture")
+	}
+}

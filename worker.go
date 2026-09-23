@@ -509,12 +509,25 @@ func (w *CameraWorker) enqueueDetect(label string, sad float64, opened bool, blo
 		BlobW:    blobW,
 		BlobH:    blobH,
 	}
+	// Hold before the job is visible. Otherwise processDetect can ReleaseClip
+	// before this hold, and the later hold is never dropped.
+	rel := ""
+	if opened {
+		rel = motionClipRel(ev)
+		w.clipper.holdClip(rel)
+	}
 	if w.adm != nil && !w.adm.fill(h, ev) {
+		if rel != "" {
+			w.clipper.releaseClip(rel)
+		}
 		w.adm.release(h)
 		return false
 	}
+	if h.claimed.saveClip {
+		w.clipper.releaseClip(motionClipRel(h.claimed.ev))
+	}
 	if opened {
-		w.clipper.capture(ev.Cam, motionClipRel(ev), ev.At)
+		w.clipper.capture(ev.Cam, rel, ev.At)
 	}
 	if w.logQ == nil || !opened {
 		return true
@@ -551,6 +564,30 @@ func (c *alertClipper) register(w *CameraWorker) {
 	c.byName[w.cfg.Name] = w
 	c.mu.Unlock()
 	w.clipper = c
+}
+
+func (c *alertClipper) holdClip(rel string) {
+	if c == nil || rel == "" {
+		return
+	}
+	c.mu.Lock()
+	store := c.store
+	c.mu.Unlock()
+	if store != nil {
+		store.HoldClip(rel)
+	}
+}
+
+func (c *alertClipper) releaseClip(rel string) {
+	if c == nil || rel == "" {
+		return
+	}
+	c.mu.Lock()
+	store := c.store
+	c.mu.Unlock()
+	if store != nil {
+		store.ReleaseClip(rel)
+	}
 }
 
 func (c *alertClipper) capture(cam, rel string, at time.Time) {

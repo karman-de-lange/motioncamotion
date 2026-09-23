@@ -57,18 +57,12 @@ func (a *admissions) signal() {
 	}
 }
 
-func (a *admissions) extraIndex(cam string) int {
+func (a *admissions) jobIndex(saveClip bool, cam string, anyCam bool) int {
 	for i := range a.q {
-		if a.q[i].ev.Cam == cam && !a.q[i].saveClip {
-			return i
+		if a.q[i].saveClip != saveClip {
+			continue
 		}
-	}
-	return -1
-}
-
-func (a *admissions) extraIndexAny() int {
-	for i := range a.q {
-		if !a.q[i].saveClip {
+		if anyCam || a.q[i].ev.Cam == cam {
 			return i
 		}
 	}
@@ -96,38 +90,39 @@ func (a *admissions) hold(cam string, saveClip bool) (admitHold, bool) {
 	defer a.mu.Unlock()
 	n := a.pending[cam]
 	qn := a.queued()
+	idx := -1
 	if saveClip {
-		if qn >= a.cap {
-			if i := a.extraIndex(cam); i >= 0 {
-				h.kind = holdReplace
-				h.claimed = a.takeAt(i)
-				a.held++
-				return h, true
-			}
-			if i := a.extraIndexAny(); i >= 0 {
-				h.kind = holdReplaceAny
-				h.claimed = a.takeAt(i)
-				a.held++
-				return h, true
-			}
-		}
-		a.pending[cam]++
-		a.held++
-		h.kind = holdAppend
-		return h, true
-	}
-	if n >= a.perCam || qn >= a.cap {
-		if i := a.extraIndex(cam); i >= 0 {
+		// One open per camera. A newer episode replaces the queued one.
+		if i := a.jobIndex(true, cam, false); i >= 0 {
 			h.kind = holdReplace
-			h.claimed = a.takeAt(i)
-			a.held++
-			return h, true
+			idx = i
+		} else if qn >= a.cap {
+			if i := a.jobIndex(false, cam, false); i >= 0 {
+				h.kind = holdReplace
+				idx = i
+			} else if i := a.jobIndex(false, cam, true); i >= 0 {
+				h.kind = holdReplaceAny
+				idx = i
+			} else if i := a.jobIndex(true, cam, true); i >= 0 {
+				h.kind = holdReplaceAny
+				idx = i
+			}
 		}
-		return admitHold{}, false
+	} else if n >= a.perCam || qn >= a.cap {
+		i := a.jobIndex(false, cam, false)
+		if i < 0 {
+			return admitHold{}, false
+		}
+		h.kind = holdReplace
+		idx = i
 	}
-	a.pending[cam]++
+	if idx < 0 {
+		a.pending[cam]++
+		h.kind = holdAppend
+	} else {
+		h.claimed = a.takeAt(idx)
+	}
 	a.held++
-	h.kind = holdAppend
 	return h, true
 }
 

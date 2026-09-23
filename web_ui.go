@@ -100,6 +100,12 @@ nav button.active{background:var(--acc2);color:#fff}
 .badge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:.66rem;font-weight:650;text-transform:capitalize}
 .badge.alert{background:rgba(232,93,93,.18);color:#ffb4b4;border:1px solid rgba(232,93,93,.35)}
 .badge.motion{background:rgba(106,168,232,.15);color:#a8d0f0;border:1px solid rgba(106,168,232,.3)}
+.badge.false{background:rgba(232,93,93,.18);color:#ffb4b4;border:1px solid rgba(232,93,93,.45)}
+.badge.real{background:rgba(62,207,142,.15);color:#8ee0b8;border:1px solid rgba(62,207,142,.4)}
+.verdict-row{display:flex;gap:8px;align-items:center;margin-top:10px}
+.btn.mark-false.on{border-color:var(--al);color:#ffb4b4}
+.btn.mark-real.on{border-color:var(--ok);color:var(--ok)}
+.mark-count{color:var(--mut);font-size:.75rem}
 .more-wrap{padding:10px;text-align:center;border-top:1px solid var(--bd)}
 .empty{color:var(--mut);padding:28px;text-align:center}
 .toast{
@@ -255,9 +261,9 @@ const webAppJS = `
   }
   function readFilters(){
     var since=val('since'), until=val('until');
-    return {type:val('type'), cam:val('cam'), class:val('class'), since:isoSince(since), until:isoUntil(until)};
+    return {type:val('type'), cam:val('cam'), class:val('class'), verdict:val('verdict'), since:isoSince(since), until:isoUntil(until)};
   }
-  function hasActiveFilters(f){ return !!(f.type||f.cam||f.class||f.since||f.until); }
+  function hasActiveFilters(f){ return !!(f.type||f.cam||f.class||f.verdict||f.since||f.until); }
 
   function eventMatches(e, f){
     if(!e) return false;
@@ -271,6 +277,8 @@ const webAppJS = `
     }
     if(f.since && new Date(e.at)<new Date(f.since)) return false;
     if(f.until && new Date(e.at)>=new Date(f.until)) return false;
+    if(f.verdict==='none'){ if(e.verdict) return false; }
+    else if(f.verdict && e.verdict!==f.verdict) return false;
     return true;
   }
 
@@ -285,8 +293,10 @@ const webAppJS = `
       +'</select></label>'
       +'<label>From <input type="date" data-f="since"></label>'
       +'<label>To <input type="date" data-f="until"></label>'
+      +'<label>Mark <select data-f="verdict"><option value="">Any</option><option value="false">False</option><option value="real">Real</option><option value="none">Unmarked</option></select></label>'
       +'<button type="button" class="btn" id="btnReset">Reset</button>'
-      +'<span class="filter-count" id="evCount"></span></div>';
+      +'<span class="filter-count" id="evCount"></span>'
+      +'<span class="mark-count" id="markCount"></span></div>';
   }
 
   document.getElementById('events-filters').innerHTML=filterBarHTML();
@@ -304,6 +314,7 @@ const webAppJS = `
     if(f.type) q+='&type='+encodeURIComponent(f.type);
     if(f.cam) q+='&cam='+encodeURIComponent(f.cam);
     if(f.class) q+='&class='+encodeURIComponent(f.class);
+    if(f.verdict) q+='&verdict='+encodeURIComponent(f.verdict);
     if(f.since) q+='&since='+encodeURIComponent(f.since);
     if(f.until) q+='&until='+encodeURIComponent(f.until);
     if(extra && extra.before) q+='&before='+encodeURIComponent(extra.before);
@@ -329,6 +340,9 @@ const webAppJS = `
       rows.forEach(function(e){ if(e && e.id && !seen[e.id]){ st.rows.push(e); seen[e.id]=true; } });
       st.total=typeof data.total==='number' ? data.total : st.rows.length;
       st.hasMore=!!data.has_more;
+      if(typeof data.false_n==='number') st.falseN=data.false_n;
+      if(typeof data.real_n==='number') st.realN=data.real_n;
+      updateMarkCount();
       renderList();
     }).catch(function(err){
       document.getElementById('events-list').innerHTML='<div class="empty">Load failed: '+esc(err)+'</div>';
@@ -369,9 +383,10 @@ const webAppJS = `
 
   function evRowHTML(e){
     var thumb=e.still ? '<img class="ev-thumb" data-src="'+mediaThumb(e.still)+'" alt="">' : '<div class="ev-thumb-empty">—</div>';
+    var mark=e.verdict==='false'||e.verdict==='real' ? ' <span class="badge '+esc(e.verdict)+'">'+esc(e.verdict)+'</span>' : '';
     return '<div class="ev'+(st.selected===e.id?' selected':'')+'" data-id="'+esc(e.id)+'">'
       +thumb
-      +'<div class="ev-meta"><div class="ev-top"><span class="badge '+esc(e.type)+'">'+esc(e.type)+'</span> '+esc(e.cam)+'</div>'
+      +'<div class="ev-meta"><div class="ev-top"><span class="badge '+esc(e.type)+'">'+esc(e.type)+'</span> '+esc(e.cam)+mark+'</div>'
       +'<div class="ev-when">'+esc(fmtWhen(e.at))+'</div>'
       +'<div class="ev-det">'+esc(detsLine(e))+'</div></div></div>';
   }
@@ -383,6 +398,12 @@ const webAppJS = `
     if(!count) return;
     var shown=st.rows.length;
     count.textContent=st.total ? (shown+' of '+st.total) : (shown? String(shown) : '');
+  }
+  function updateMarkCount(){
+    var el=document.getElementById('markCount');
+    if(!el) return;
+    var f=st.falseN||0, r=st.realN||0;
+    el.textContent= (f||r) ? ('false '+f+' · real '+r) : '';
   }
 
   var thumbIO=null;
@@ -451,10 +472,74 @@ const webAppJS = `
     } else if(e.type==='motion'){
       h+='<p style="color:var(--mut);margin:8px 0 0">Motion only — no YOLO box.</p>';
     }
+    if(e.type==='alert'){
+      h+='<div class="verdict-row">';
+      h+='<button type="button" class="btn mark-false'+(e.verdict==='false'?' on':'')+'" id="btnFalse">False</button>';
+      h+='<button type="button" class="btn mark-real'+(e.verdict==='real'?' on':'')+'" id="btnReal">Real</button>';
+      h+='<span class="mark-count" id="verdictMsg"></span>';
+      h+='</div>';
+    }
     h+='</div>';
     d.innerHTML=h;
     var img=document.getElementById('detailImg');
     if(img) img.addEventListener('click', function(){ openLight(img.src); });
+    var btnF=document.getElementById('btnFalse');
+    var btnR=document.getElementById('btnReal');
+    if(btnF) btnF.addEventListener('click', function(){ setVerdict(e.id, 'false'); });
+    if(btnR) btnR.addEventListener('click', function(){ setVerdict(e.id, 'real'); });
+  }
+
+  function paintRow(e){
+    var row=document.querySelector('.ev[data-id="'+e.id+'"]');
+    if(!row) return;
+    var top=row.querySelector('.ev-top');
+    if(!top) return;
+    var mark=e.verdict==='false'||e.verdict==='real' ? ' <span class="badge '+esc(e.verdict)+'">'+esc(e.verdict)+'</span>' : '';
+    top.innerHTML='<span class="badge '+esc(e.type)+'">'+esc(e.type)+'</span> '+esc(e.cam)+mark;
+  }
+
+  function setVerdict(id, verdict){
+    var e=st.rows.find(function(x){return x.id===id;});
+    if(!e) return;
+    if(!st.verdictPending) st.verdictPending={};
+    if(!st.verdictGen) st.verdictGen={};
+    var cur=st.verdictPending[id];
+    if(cur===undefined) cur=e.verdict||'';
+    if(cur===verdict) verdict='';
+    st.verdictPending[id]=verdict;
+    var gen=(st.verdictGen[id]||0)+1;
+    st.verdictGen[id]=gen;
+    var msg=document.getElementById('verdictMsg');
+    fetch('/api/events/verdict', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:id, verdict:verdict})
+    }).then(function(r){
+      if(!r.ok) throw new Error('save failed');
+      return r.json();
+    }).then(function(data){
+      if(st.verdictGen[id]!==gen) return;
+      delete st.verdictPending[id];
+      e.verdict=data.verdict||'';
+      if(typeof data.false_n==='number') st.falseN=data.false_n;
+      if(typeof data.real_n==='number') st.realN=data.real_n;
+      updateMarkCount();
+      var f=readFilters();
+      if(f.verdict && !eventMatches(e, f)){
+        st.rows=st.rows.filter(function(x){return x.id!==id;});
+        st.total=Math.max(0, st.total-1);
+        st.selected=null;
+        renderList();
+        showDetail(null);
+        return;
+      }
+      paintRow(e);
+      if(st.selected===id) showDetail(e);
+    }).catch(function(){
+      if(st.verdictGen[id]!==gen) return;
+      delete st.verdictPending[id];
+      if(msg) msg.textContent='Could not save';
+    });
   }
 
   function openLight(src){

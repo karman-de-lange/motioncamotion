@@ -141,8 +141,53 @@ func TestAdmit_openWhenFullOfOpens(t *testing.T) {
 			n++
 		}
 	}
-	if n != 3 {
-		t.Fatalf("opens=%d want 3", n)
+	if n != 2 {
+		t.Fatalf("opens=%d want 2 (oldest open replaced)", n)
+	}
+}
+
+func TestAdmit_secondOpenReplacesSameCam(t *testing.T) {
+	a := newAdmissions()
+	if !a.push(DetectEvent{Cam: "c1", Label: "old"}, true) {
+		t.Fatal("old")
+	}
+	if !a.push(DetectEvent{Cam: "c1", Label: "new"}, true) {
+		t.Fatal("new")
+	}
+	if len(a.q) != 1 {
+		t.Fatalf("q=%d want 1", len(a.q))
+	}
+	ev, opened, ok := a.pull()
+	if !ok || ev.Label != "new" || !opened {
+		t.Fatalf("want new open, got %s opened=%v ok=%v", ev.Label, opened, ok)
+	}
+	if _, _, ok := a.pull(); ok {
+		t.Fatal("old open still queued")
+	}
+}
+
+func TestAdmit_fullOfOpensReplacesOldest(t *testing.T) {
+	a := newAdmissions()
+	a.cap = 2
+	if !a.push(DetectEvent{Cam: "c1", Label: "o1"}, true) {
+		t.Fatal("o1")
+	}
+	if !a.push(DetectEvent{Cam: "c2", Label: "o2"}, true) {
+		t.Fatal("o2")
+	}
+	if !a.push(DetectEvent{Cam: "c3", Label: "o3"}, true) {
+		t.Fatal("o3")
+	}
+	if len(a.q) != 2 {
+		t.Fatalf("q=%d want cap 2", len(a.q))
+	}
+	ev, _, ok := a.pull()
+	if !ok || ev.Cam != "c2" {
+		t.Fatalf("want c2, got %s ok=%v", ev.Cam, ok)
+	}
+	ev, _, ok = a.pull()
+	if !ok || ev.Cam != "c3" {
+		t.Fatalf("want c3, got %s ok=%v", ev.Cam, ok)
 	}
 }
 
@@ -207,6 +252,56 @@ func TestAdmit_globalFullReplacesExtra(t *testing.T) {
 	}
 	if _, _, ok := a.pull(); ok {
 		t.Fatal("queue should be empty")
+	}
+}
+
+func TestAdmit_openAtCapDropsExtraNotOpen(t *testing.T) {
+	a := newAdmissions()
+	a.cap = 2
+	if !a.push(DetectEvent{Cam: "c1", Label: "o1"}, true) {
+		t.Fatal("c1")
+	}
+	if !a.push(DetectEvent{Cam: "c2", Label: "x2"}, false) {
+		t.Fatal("c2")
+	}
+	if !a.push(DetectEvent{Cam: "c3", Label: "o3"}, true) {
+		t.Fatal("c3")
+	}
+	ev, opened, ok := a.pull()
+	if !ok || ev.Cam != "c1" || ev.Label != "o1" || !opened {
+		t.Fatalf("want c1 open, got %s/%s opened=%v ok=%v", ev.Cam, ev.Label, opened, ok)
+	}
+	ev, opened, ok = a.pull()
+	if !ok || ev.Cam != "c3" || ev.Label != "o3" || !opened {
+		t.Fatalf("want c3 open, got %s/%s opened=%v ok=%v", ev.Cam, ev.Label, opened, ok)
+	}
+	if _, _, ok := a.pull(); ok {
+		t.Fatal("c2 extra still queued")
+	}
+}
+
+func TestAdmit_openReplacesOwnExtraNotOther(t *testing.T) {
+	a := newAdmissions()
+	a.cap = 2
+	if !a.push(DetectEvent{Cam: "c2", Label: "x2"}, false) {
+		t.Fatal("c2")
+	}
+	if !a.push(DetectEvent{Cam: "c1", Label: "x1"}, false) {
+		t.Fatal("c1")
+	}
+	if !a.push(DetectEvent{Cam: "c1", Label: "o1"}, true) {
+		t.Fatal("open")
+	}
+	ev, opened, ok := a.pull()
+	if !ok || ev.Cam != "c2" || ev.Label != "x2" || opened {
+		t.Fatalf("want c2 extra, got %s/%s opened=%v ok=%v", ev.Cam, ev.Label, opened, ok)
+	}
+	ev, opened, ok = a.pull()
+	if !ok || ev.Cam != "c1" || ev.Label != "o1" || !opened {
+		t.Fatalf("want c1 open, got %s/%s opened=%v ok=%v", ev.Cam, ev.Label, opened, ok)
+	}
+	if _, _, ok := a.pull(); ok {
+		t.Fatal("c1 extra still queued")
 	}
 }
 

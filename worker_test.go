@@ -700,6 +700,46 @@ func TestEnqueueDetect_openCapturesClip(t *testing.T) {
 	}
 }
 
+func TestEnqueueDetect_secondOpenDropsFirstHold(t *testing.T) {
+	store, err := newEventStore(t.TempDir(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPost := clipPostDur
+	clipPostDur = 0
+	defer func() { clipPostDur = oldPost }()
+	w := NewCameraWorker(Camera{Name: "c1"}, 3, 64*1024, 1, 1, 3, 3, nil)
+	w.adm = newAdmissions()
+	clipper := &alertClipper{store: store}
+	clipper.register(w)
+	w.ring.push(fakeHEVCKeyframe())
+	firstDone := make(chan struct{})
+	w.afterClipPre = func() { close(firstDone) }
+	if !w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
+		t.Fatal("first")
+	}
+	firstEv := w.adm.q[0].ev
+	waitDone(t, firstDone, "first clip")
+	secondDone := make(chan struct{})
+	w.afterClipPre = func() { close(secondDone) }
+	if !w.enqueueDetect("motion", 1, true, 0, 0, 0, 0) {
+		t.Fatal("second")
+	}
+	secondEv := w.adm.q[0].ev
+	waitDone(t, secondDone, "second clip")
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.clipHold) != 1 || len(w.adm.q) != 1 {
+		t.Fatalf("holds=%d queued=%d", len(store.clipHold), len(w.adm.q))
+	}
+	if _, ok := store.clipHold[motionClipRel(firstEv)]; ok {
+		t.Fatal("first hold kept")
+	}
+	if store.clipHold[motionClipRel(secondEv)] != 1 {
+		t.Fatalf("second hold %d", store.clipHold[motionClipRel(secondEv)])
+	}
+}
+
 func TestEnqueueDetect_extraDoesNotCaptureClip(t *testing.T) {
 	store, err := newEventStore(t.TempDir(), 1, 10)
 	if err != nil {
